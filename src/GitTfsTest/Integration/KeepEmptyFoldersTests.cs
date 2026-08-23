@@ -60,6 +60,28 @@ namespace GitTfs.Test.Integration
         }
 
         [FactExceptOnUnix]
+        public void CloningFromAGivenChangesetKeepsEmptyFolders()
+        {
+            // `--from=N` takes a single snapshot at changeset N through QuickFetch/CopyTree
+            // instead of replaying history, which reconciles from its own call site in
+            // GitTfsRemote.quickFetch rather than from the end of FetchWithMerge's loop.
+            h.SetupFake(r =>
+            {
+                r.Changeset(1, "Project created from template", DateTime.Parse("2012-01-01 12:12:12 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject");
+                r.Changeset(2, "Add an empty folder and a file", DateTime.Parse("2012-01-02 12:12:12 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject/docs")
+                    .Change(TfsChangeType.Add, TfsItemType.File, "$/MyProject/README", "tldr");
+            });
+
+            h.Run("clone", h.TfsUrl, "$/MyProject", "MyProject", "--from=2", "--keep-empty-folders");
+
+            h.AssertFileInWorkspace("MyProject", "README", "tldr");
+            h.AssertFileInWorkspace("MyProject", "docs/.gitkeep", "");
+            Assert.Equal(1, h.GetCommitCount("MyProject"));
+        }
+
+        [FactExceptOnUnix]
         public void GitKeepsSurviveAndResumePointStaysCorrectAcrossRepeatedFetch()
         {
             h.SetupFake(r =>

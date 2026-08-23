@@ -792,10 +792,36 @@ namespace GitTfs.Core
             if (!_remoteOptions.KeepEmptyFolders)
                 return;
 
+            if (IsSubtree || IsSubtreeOwner)
+            {
+                // GetFullTree() builds its paths through a PathResolver with an empty relative
+                // prefix, so they come out WITHOUT this remote's subtree Prefix - while the
+                // commit tree read below carries it. Diffing one against the other would add
+                // placeholders at wrong, unprefixed paths and delete every correctly-placed
+                // existing one, so subtree remotes are explicitly unsupported.
+                Trace.TraceWarning("warning: --keep-empty-folders is not supported on subtree remotes; skipping.");
+                return;
+            }
+
             List<string> neededGitKeepPaths;
+            List<string> realGitKeepFilePaths;
             try
             {
-                neededGitKeepPaths = EmptyFolderTracker.GetGitKeepPaths(changeset.GetFullTree()).ToList();
+                var fullTree = changeset.GetFullTree().ToList();
+                // Placeholder paths honor the same ignore/.git rules as every other write in the
+                // pipeline: a folder that is itself ignored (or literally named ".git") is treated
+                // exactly like a folder that needs no placeholder, so it neither gains a spurious
+                // .gitkeep nor makes an existing one look stale.
+                neededGitKeepPaths = EmptyFolderTracker.GetGitKeepPaths(fullTree)
+                    .Where(path => !ShouldSkip(path))
+                    .ToList();
+                // A real, versioned TFVC file that happens to be named ".gitkeep" is
+                // indistinguishable from one of our own placeholders once it's in the git tree.
+                // Never delete one just because its folder legitimately has other content.
+                realGitKeepFilePaths = fullTree
+                    .Where(entry => entry.Item.ItemType == TfsItemType.File && EmptyFolderTracker.IsGitKeepPath(entry.FullName))
+                    .Select(entry => entry.FullName)
+                    .ToList();
             }
             catch (Exception ex)
             {
@@ -813,7 +839,10 @@ namespace GitTfs.Core
                     .ToList();
 
                 var toAdd = neededGitKeepPaths.Except(existingGitKeepPaths, StringComparer.OrdinalIgnoreCase).ToList();
-                var toRemove = existingGitKeepPaths.Except(neededGitKeepPaths, StringComparer.OrdinalIgnoreCase).ToList();
+                var toRemove = existingGitKeepPaths
+                    .Except(neededGitKeepPaths, StringComparer.OrdinalIgnoreCase)
+                    .Except(realGitKeepFilePaths, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
                 if (toAdd.Count == 0 && toRemove.Count == 0)
                     return;
 

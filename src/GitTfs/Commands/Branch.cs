@@ -54,6 +54,9 @@ namespace GitTfs.Commands
                     { "no-fetch", "Don't fetch changeset for newly initialized branch(es)", v => NoFetch = (v != null) },
                     { "u|username=", "TFS username", v => TfsUsername = v },
                     { "p|password=", "TFS password", v => TfsPassword = v },
+                    // Unlike its sibling options, this one writes straight to the injected RemoteOptions
+                    // singleton rather than to a Branch-local property forwarded by SetInitBranchParameters():
+                    // GitTfsRemote reads the live DI singleton for this option, not anything InitBranch holds.
                     { "keep-empty-folders", "Add a .gitkeep placeholder to TFVC folders that have no real content, so they survive into git", v => _remoteOptions.KeepEmptyFolders = v != null },
                 }
                 .Merge(_globals.OptionSet);

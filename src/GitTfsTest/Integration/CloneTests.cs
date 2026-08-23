@@ -157,8 +157,7 @@ namespace GitTfs.Test.Integration
             h.AssertFileInWorkspace("MyProject", "File.txt", "File contents");
             var branchCommit = h.RevParseCommit("MyProject", "refs/remotes/tfs/Branch");
             Assert.NotNull(branchCommit);
-            var branchTreeEntries = branchCommit.Tree.Select(e => e.Path).ToList();
-            Assert.Contains("docs", branchTreeEntries);
+            Assert.NotNull(branchCommit.Tree["docs/.gitkeep"]);
         }
 
         [FactExceptOnUnix]
@@ -192,8 +191,7 @@ namespace GitTfs.Test.Integration
 
             var branchCommit = h.RevParseCommit("MyProject", "refs/remotes/tfs/Branch");
             Assert.NotNull(branchCommit);
-            var branchTreeEntries = branchCommit.Tree.Select(e => e.Path).ToList();
-            Assert.Contains("docs", branchTreeEntries);
+            Assert.NotNull(branchCommit.Tree["docs/.gitkeep"]);
         }
 
         [FactExceptOnUnix]
