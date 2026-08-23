@@ -332,6 +332,8 @@ namespace GitTfs.Core
             // to track this state.
             bool firstOnBranch = true;
             bool fetchRetrievedChangesets;
+            ITfsChangeset lastChangeset = null;
+            LogEntry lastLog = null;
             do
             {
                 var fetchedChangesets = FetchChangesets(true, lastChangesetIdToFetch);
@@ -349,7 +351,15 @@ namespace GitTfs.Core
 
                     fetchResult.NewChangesetCount++;
                     if (lastChangesetIdToFetch > 0 && changeset.Summary.ChangesetId > lastChangesetIdToFetch)
+                    {
+                        // The changeset that would come next is past the requested cutoff, but
+                        // everything up to and including the previous changeset was committed
+                        // as a legitimate, complete stopping point - reconcile it same as a
+                        // normal end-of-fetch.
+                        if (lastChangeset != null)
+                            ReconcileEmptyFoldersIfNeeded(lastChangeset, lastLog);
                         return fetchResult;
+                    }
                     string parentCommitSha = null;
                     if (changeset.IsMergeChangeset && !ProcessMergeChangeset(changeset, stopOnFailMergeCommit, ref parentCommitSha))
                     {
@@ -379,6 +389,8 @@ namespace GitTfs.Core
                             log.CommitParents.Add(parent);
                     }
                     var commitSha = ProcessChangeset(changeset, log);
+                    lastChangeset = changeset;
+                    lastLog = log;
                     fetchResult.LastFetchedChangesetId = changeset.Summary.ChangesetId;
                     // set commit sha for added git objects
                     foreach (var commit in objects)
@@ -389,6 +401,10 @@ namespace GitTfs.Core
                     DoGcIfNeeded();
                 }
             } while (fetchRetrievedChangesets && latestChangesetId > fetchResult.LastFetchedChangesetId);
+
+            if (lastChangeset != null)
+                ReconcileEmptyFoldersIfNeeded(lastChangeset, lastLog);
+
             return fetchResult;
         }
 
@@ -706,6 +722,7 @@ namespace GitTfs.Core
         {
             var log = CopyTree(MaxCommitHash, changeset);
             UpdateTfsHead(Commit(log), changeset.Summary.ChangesetId);
+            ReconcileEmptyFoldersIfNeeded(changeset, log);
             DoGcIfNeeded();
         }
 
@@ -769,6 +786,65 @@ namespace GitTfs.Core
         private string TagPrefix => "refs/tags/tfs/" + Id + "/";
 
         public string RemoteRef => "refs/remotes/tfs/" + Id;
+
+        private void ReconcileEmptyFoldersIfNeeded(ITfsChangeset changeset, LogEntry log)
+        {
+            if (!_remoteOptions.KeepEmptyFolders)
+                return;
+
+            List<string> neededGitKeepPaths;
+            try
+            {
+                neededGitKeepPaths = EmptyFolderTracker.GetGitKeepPaths(changeset.GetFullTree()).ToList();
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning("warning: --keep-empty-folders: failed to list TFS items to determine empty folders (" + ex.Message + "). Skipping for this fetch.");
+                return;
+            }
+
+            var commitSha = MaxCommitHash;
+            var existingGitKeepPaths = Repository.GetCommit(commitSha).GetTree()
+                .Select(entry => entry.FullName)
+                .Where(EmptyFolderTracker.IsGitKeepPath)
+                .ToList();
+
+            var toAdd = neededGitKeepPaths.Except(existingGitKeepPaths, StringComparer.OrdinalIgnoreCase).ToList();
+            var toRemove = existingGitKeepPaths.Except(neededGitKeepPaths, StringComparer.OrdinalIgnoreCase).ToList();
+            if (toAdd.Count == 0 && toRemove.Count == 0)
+                return;
+
+            string placeholderFile = null;
+            try
+            {
+                var treeBuilder = Repository.GetTreeBuilder(commitSha);
+                if (toAdd.Count > 0)
+                {
+                    placeholderFile = Path.GetTempFileName();
+                    foreach (var path in toAdd)
+                        treeBuilder.Add(path, placeholderFile, LibGit2Sharp.Mode.NonExecutableFile);
+                }
+                foreach (var path in toRemove)
+                    treeBuilder.Remove(path);
+
+                // log.Log already carries the git-tfs-id trailer appended by the earlier
+                // Commit(log) call for this same LogEntry - committing directly via
+                // Repository.Commit (not the private Commit(LogEntry) wrapper) avoids
+                // appending it a second time.
+                log.Tree = treeBuilder.GetTree();
+                var newCommit = Repository.Commit(log);
+                UpdateTfsHead(newCommit.Sha, MaxChangesetId);
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning("warning: --keep-empty-folders: failed to add or remove .gitkeep placeholders (" + ex.Message + "). Skipping for this fetch.");
+            }
+            finally
+            {
+                if (placeholderFile != null)
+                    File.Delete(placeholderFile);
+            }
+        }
 
         private void DoGcIfNeeded()
         {
