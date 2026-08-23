@@ -108,7 +108,7 @@ namespace GitTfs.VsFake
 
             public int ChangesetId => _changeset.Id;
 
-            public IVersionControlServer VersionControlServer => throw new NotImplementedException();
+            public IVersionControlServer VersionControlServer => _versionControlServer;
 
             public void Get(ITfsWorkspace workspace, IEnumerable<IChange> changes, Action<Exception> ignorableErrorHandler) => workspace.Get(ChangesetId, changes);
         }
@@ -202,7 +202,22 @@ namespace GitTfs.VsFake
                 _repositoryRoot = repositoryRoot;
             }
 
-            public void GetSpecificVersion(int changesetId, IEnumerable<IItem> items, bool noParallel) => throw new NotImplementedException();
+            public void GetSpecificVersion(int changesetId, IEnumerable<IItem> items, bool noParallel)
+            {
+                var repositoryRoot = _repositoryRoot.ToLower();
+                if (!repositoryRoot.EndsWith("/")) repositoryRoot += "/";
+                foreach (var item in items)
+                {
+                    if (item.ItemType == TfsItemType.File)
+                    {
+                        var outPath = Path.Combine(_directory, item.ServerItem.ToLower().Replace(repositoryRoot, ""));
+                        var outDir = Path.GetDirectoryName(outPath);
+                        if (!Directory.Exists(outDir)) Directory.CreateDirectory(outDir);
+                        using (var download = item.DownloadFile())
+                            File.WriteAllText(outPath, File.ReadAllText(download.Path));
+                    }
+                }
+            }
 
             public void GetSpecificVersion(IChangeset changeset, bool noParallel) => GetSpecificVersion(changeset.ChangesetId, changeset.Changes, noParallel);
 
@@ -356,7 +371,7 @@ namespace GitTfs.VsFake
 
         public ICheckinNote CreateCheckinNote(Dictionary<string, string> checkinNotes) => throw new NotImplementedException();
 
-        public ITfsChangeset GetChangeset(int changesetId, IGitTfsRemote remote) => throw new NotImplementedException();
+        public ITfsChangeset GetChangeset(int changesetId, IGitTfsRemote remote) => BuildTfsChangeset(_script.Changesets.First(c => c.Id == changesetId), remote);
         public bool HasShelveset(string shelvesetName) => throw new NotImplementedException();
 
         public ITfsChangeset GetShelvesetData(IGitTfsRemote remote, string shelvesetOwner, string shelvesetName) => throw new NotImplementedException();
@@ -397,7 +412,30 @@ namespace GitTfs.VsFake
 
             public IItem GetItem(string itemPath, int changesetNumber) => throw new NotImplementedException();
 
-            public IItem[] GetItems(string itemPath, int changesetNumber, TfsRecursionType recursionType) => throw new NotImplementedException();
+            public IItem[] GetItems(string itemPath, int changesetNumber, TfsRecursionType recursionType)
+            {
+                if (recursionType != TfsRecursionType.Full)
+                    throw new NotImplementedException();
+
+                var liveItems = new Dictionary<string, (ScriptedChangeset Changeset, ScriptedChange Change)>(StringComparer.InvariantCultureIgnoreCase);
+                foreach (var changeset in _script.Changesets.Where(cs => cs.Id <= changesetNumber).OrderBy(cs => cs.Id))
+                {
+                    foreach (var change in changeset.Changes)
+                    {
+                        if (change.ChangeType.IncludesOneOf(TfsChangeType.Delete))
+                            liveItems.Remove(change.RepositoryPath);
+                        else
+                            liveItems[change.RepositoryPath] = (changeset, change);
+                    }
+                }
+
+                var root = itemPath.TrimEnd('/');
+                return liveItems
+                    .Where(kv => string.Equals(kv.Key, root, StringComparison.InvariantCultureIgnoreCase)
+                              || kv.Key.StartsWith(root + "/", StringComparison.InvariantCultureIgnoreCase))
+                    .Select(kv => (IItem)new Change(this, kv.Value.Changeset, kv.Value.Change))
+                    .ToArray();
+            }
 
             public IEnumerable<IChangeset> QueryHistory(string path, int version, int deletionId, TfsRecursionType recursion, string user, int versionFrom, int versionTo, int maxCount, bool includeChanges, bool slotMode, bool includeDownloadInfo) => throw new NotImplementedException();
         }

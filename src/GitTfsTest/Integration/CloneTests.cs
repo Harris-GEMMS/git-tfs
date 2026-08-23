@@ -115,6 +115,26 @@ namespace GitTfs.Test.Integration
         }
 
         [FactExceptOnUnix]
+        public void CloneFromAGivenChangesetUsesASingleSnapshot()
+        {
+            h.SetupFake(r =>
+            {
+                r.Changeset(1, "Project created from template", DateTime.Parse("2012-01-01 12:12:12 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject");
+                r.Changeset(2, "Add a folder and a file", DateTime.Parse("2012-01-02 12:12:12 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject/Folder")
+                    .Change(TfsChangeType.Add, TfsItemType.File, "$/MyProject/Folder/File.txt", "File contents")
+                    .Change(TfsChangeType.Add, TfsItemType.File, "$/MyProject/README", "tldr");
+            });
+
+            h.Run("clone", h.TfsUrl, "$/MyProject", "MyProject", "--from=2");
+
+            h.AssertFileInWorkspace("MyProject", "Folder/File.txt", "File contents");
+            h.AssertFileInWorkspace("MyProject", "README", "tldr");
+            Assert.Equal(1, h.GetCommitCount("MyProject"));
+        }
+
+        [FactExceptOnUnix]
         public void CloneWithMixedUpCase()
         {
             h.SetupFake(r =>
