@@ -845,6 +845,29 @@ git commit -m "test: add safety-boundary test for --keep-empty-folders"
 
 ### Task 6: Propagate the option to `--branches=all`
 
+> **⚠️ SUPERSEDED DURING IMPLEMENTATION — the approach described in this task
+> was NOT what shipped.** This task's premise (that `--branches=all` silently
+> drops the flag, fixed by threading `RemoteOptions` through `Clone`/
+> `QuickClone` into a new `InitBranch.KeepEmptyFolders` property) turned out
+> to be wrong on the facts. Writing the test first showed
+> `clone --branches=all --keep-empty-folders` **already worked with no code
+> changes**: `GitRepository.BuildRemote` resolves every `GitTfsRemote` through
+> the DI container and never overrides `RemoteOptions`, so the singleton
+> holding the parsed flag is already shared by trunk and auto-discovered
+> branches alike. Adding an entry to `InitBranch.OptionSet` would have been
+> dead code too — `InitBranch` has no `[Pluggable]` attribute, so its
+> `OptionSet` is never parsed from a command line. The one real gap was a
+> different entry point: standalone `git tfs branch --init --all`, whose
+> `[Pluggable]` command is `Branch.cs`, which simply had no
+> `--keep-empty-folders` option. What shipped is one file: `Branch` takes
+> `RemoteOptions` as a constructor dependency (mirroring `Fetch`) and gains
+> one `OptionSet` entry writing straight to that injected singleton. No
+> changes to `Clone.cs`, `QuickClone.cs`, or `InitBranch.cs`. See the
+> corrected §4 of
+> `docs/superpowers/specs/2026-08-23-keep-empty-folders-design.md` for the
+> full explanation. The steps below are retained as a record of the plan as
+> written, not as instructions to follow.
+
 `RemoteOptions` is a `[StructureMapSingleton]`, so `--keep-empty-folders`
 parsed on `clone` is automatically visible to `Fetch`/`Init`. It is *not*
 visible to remotes auto-discovered via `--branches=all`: `Clone.Run()` calls

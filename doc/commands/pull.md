@@ -60,6 +60,9 @@ The `pull` command fetches TFS changesets (like the `fetch` command) and merges
                                   Ignore restricted changesets
           --ignore-regex=VALUE   A regex of files to ignore
           --except-regex=VALUE   A regex of exceptions to '--ignore-regex'
+          --keep-empty-folders   Add a .gitkeep placeholder to TFVC folders that
+                                  have no real content, so they survive into git
+                                  (see [clone](clone.md#keep-empty-folders))
       -u, --username=VALUE       TFS username
       -p, --password=VALUE       TFS password
       -r, --rebase               rebase your modifications on tfs changes

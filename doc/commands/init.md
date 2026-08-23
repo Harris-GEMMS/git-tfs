@@ -23,6 +23,9 @@ Prefer the [clone](clone.md) command to initialize and fetch changesets from a T
           --workspace=VALUE      set tfs workspace to a specific folder (a
                                    shorter path is better!)
           --ignore-regex=VALUE   a regex of files to ignore
+          --keep-empty-folders   Add a .gitkeep placeholder to TFVC folders that
+                                   have no real content, so they survive into git
+                                   (see [clone](clone.md#keep-empty-folders))
       -u, --username=VALUE       TFS username
       -p, --password=VALUE       TFS password
           --no-parallel          Do not do parallel requests to TFS

@@ -47,6 +47,10 @@ The `branch` command allows you to manage TFS branches. With this command, you c
 		  --init                 Initialize an existing TFS branch
           --ignore-regex=VALUE   a regex of files to ignore
           --except-regex=VALUE   a regex of exceptions to ignore-regex
+          --keep-empty-folders   Add a .gitkeep placeholder to TFVC folders that
+                                   have no real content, so they survive into git
+                                   (used with --init; see
+                                   [clone](clone.md#keep-empty-folders))
 		  --no-fetch              Don't fetch changeset for inited branch(es)
 	  -u, --username=VALUE       TFS username
 	  -p, --password=VALUE       TFS password

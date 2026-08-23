@@ -25,6 +25,8 @@ a TFS source tree and fetch all the changesets
 								   committed and used to ignore files
 		  --ignore-regex=VALUE   a regex of files to ignore
 		  --except-regex=VALUE   a regex of exceptions to ignore-regex
+		  --keep-empty-folders   Add a .gitkeep placeholder to TFVC folders that
+								   have no real content, so they survive into git
 	  -u, --username=VALUE       TFS username
 	  -p, --password=VALUE       TFS password
 		  --no-parallel          Do not do parallel requests to TFS
@@ -192,6 +194,35 @@ matching one of the regex in the file. You need to give the path toward of an ex
 
 You could download a `.gitignore` file for your language or project from the [github repository](https://github.com/github/gitignore)
  or generate one for multiple languages using [gitignore.io](https://www.gitignore.io/)
+
+### Keep empty folders
+
+TFVC allows a folder to exist with nothing in it; git has no way to represent an empty directory,
+so by default git-tfs silently drops every such folder. With the option `--keep-empty-folders`,
+git-tfs adds a `.gitkeep` placeholder file to each TFVC folder that has no real content, so the
+folder survives into the git repository:
+
+    git tfs clone http://tfs:8080/tfs/DefaultCollection $/Project1 --keep-empty-folders
+
+Notes:
+
+* **Only genuinely empty folders get a placeholder.** Emptiness is judged against the raw TFVC
+  content of the folder, *before* `--ignore-regex`/`--gitignore` are applied. A folder that really
+  did have files in TFVC but whose files you chose to exclude (a `packages/` folder full of
+  checked-in NuGet packages, say) is *not* empty, and gets nothing at all in the git tree — that
+  is a different statement from "this folder was empty in TFVC". A folder that is itself excluded
+  by your ignore rules gets no placeholder either.
+* Only the deepest folder of a chain of empty folders gets a `.gitkeep` — git recreates the
+  intermediate directories automatically when it checks the placeholder out.
+* **This is a per-invocation flag with no retroactive backfill.** It is not saved to the git
+  config. Passing it to a later `fetch`/`pull` only affects the changesets fetched by *that*
+  invocation; folders already dropped by an earlier `clone`/`fetch` are not fixed up
+  retroactively, and a `fetch` that finds nothing new to fetch is a no-op. To keep the behaviour,
+  pass the option on every invocation.
+* Pushing back to TFS (`checkin`/`rcheckin`) does not treat `.gitkeep` specially — the placeholder
+  is checked in as an ordinary file.
+* Not supported on subtree remotes (a remote set up with `subtree`); reconciliation is skipped
+  there with a warning.
 
 ### Authentication
 

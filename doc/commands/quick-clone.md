@@ -53,6 +53,11 @@ Useful for making code changes or additions where past history isn't relevant.
 			(Type: Value required, Value Type:[String])
 			If specified, git-tfs will not sync any paths that match this regular expression.
 
+		--keep-empty-folders
+			(Type: Flag, Value Type:[Boolean])
+			Add a .gitkeep placeholder to TFVC folders that have no real content, so
+				they survive into git. See [clone](clone.md#keep-empty-folders).
+
 		-c, --changeset
 			(Type: Value optional, Value Type:[Int32])
 			Specify a changeset to clone from

@@ -78,16 +78,12 @@ config persistence.
 
 Placeholder filename is fixed as `.gitkeep`, not configurable.
 
-**`branch --init`/`--branches=all` is a separate CLI surface, not covered by
-the above.** `InitBranch` (`src/GitTfs/Commands/InitBranch.cs`) does not
-merge `RemoteOptions.OptionSet` — it hand-rolls its own options (mirroring
-`--ignore-regex`/`--except-regex` as its own properties, not delegated to a
-shared `RemoteOptions`), and it is invoked as a direct method call from
-`Clone.Run()` when `--branches=all` is used, not by re-parsing the command
-line. So `--keep-empty-folders` needs its own entry on `InitBranch.OptionSet`
-too, for `branch --init` used standalone — see "Propagating to
-`--branches=all`" below for why this is also required for the flag to reach
-branches auto-discovered during a `clone --branches=all` run.
+**`branch --init` is a separate CLI surface, not covered by the above.** The
+`branch` command (`src/GitTfs/Commands/Branch.cs`) hand-rolls its own
+`OptionSet` and does not merge `RemoteOptions.OptionSet`, so it needs its own
+`--keep-empty-folders` entry. `clone --branches=all`, by contrast, needs
+nothing extra — see §4 for both, and for the design-time diagnosis that got
+this wrong.
 
 ### 2. Core algorithm: `EmptyFolderTracker`
 
@@ -114,6 +110,23 @@ the resulting git tree for that folder), while a genuinely-empty `docs/`
 folder does get one. Getting this backwards would mean any ignored,
 non-empty folder grows a spurious placeholder the moment its real content is
 filtered out — exactly the opposite of user intent.
+
+**The placeholder *paths themselves* are still filtered through the same
+ignore rules as every other write in the pipeline**, i.e.
+`GitTfsRemote.ShouldSkip(path)` (`IsInDotGit(path) || IsIgnored(path)`), which
+`TfsChangeset.GetTree()` already applies to every real file it writes. The two
+rules operate on different things and don't conflict: emptiness is judged
+against the raw listing (so an *ignored-but-real* folder is correctly seen as
+non-empty and gets nothing), while `ShouldSkip` suppresses a placeholder for a
+folder that is *itself* matched by `--ignore-regex`/`.gitignore` — an ignored,
+genuinely-empty folder should no more grow a `.gitkeep` than an ignored file
+should be written. Filtering is applied to `GetGitKeepPaths`' output *before*
+the add/remove set difference, so a skipped path is treated identically to
+"doesn't need a placeholder" on both sides — it is neither added nor does it
+make an existing entry look stale. This also keeps a TFVC folder literally
+named `.git` from producing an invalid `.git/.gitkeep` tree entry that
+libgit2 would reject, which would abort the whole (best-effort) reconciliation
+pass and lose every other legitimate placeholder in that fetch.
 
 `GetGitKeepPaths` only computes the "should have a `.gitkeep`" set — a
 one-shot, in-memory, bottom-up walk over the raw listing, no TFS server calls
@@ -155,9 +168,19 @@ new tip:
    states; those are simply picked up by whichever later invocation actually
    reaches a complete stopping point.
 2. Issue one raw listing query at that exact changeset, files and folders,
-   unfiltered — the same root-path / subtree-union logic
-   `TfsChangeset.GetFullTree()` already uses for `Summary.Remote.TfsSubtreePaths`,
-   so multi-subtree remotes are handled without extra design. When this
+   unfiltered, via `TfsChangeset.GetFullTree()`. **Subtree remotes are
+   explicitly unsupported and skipped** (with a one-time warning), because
+   `GetFullTree()`'s paths and the commit tree's paths don't agree for them:
+   `GetFullTree()` builds paths through a `PathResolver` with a hard-coded
+   empty relative-path prefix, so they come out *without* the owner remote's
+   `Prefix`, while the `.gitkeep` paths read back out of the commit's own tree
+   *do* carry it. (`GetFullTree()`'s subtree-union branch doesn't rescue this:
+   it only fires when `Summary.Remote.TfsRepositoryPath == null`, which is not
+   the case for the changesets the fetch loop hands to reconciliation — those
+   come from the subtree-*child* remotes.) Reconciling one against the other
+   would add placeholders at wrong, unprefixed paths and delete every
+   correctly-placed existing one, so `ReconcileEmptyFoldersIfNeeded` returns
+   early for any remote where `IsSubtree || IsSubtreeOwner`. When this
    invocation happened to go through `CopyTree`/`QuickFetch`, that path has
    already fetched an equivalent full listing via `GetFullTree()` — issuing
    it again for reconciliation is a redundant TFS round trip for that case
@@ -178,49 +201,58 @@ independent of how many changesets were replayed to produce that invocation's
 final commit. The *mechanics* run per-remote — each `GitTfsRemote` (each
 branch, in a `--branches=all` clone) tracks its own `MaxCommitHash`/
 `RemoteRef` independently, so reconciliation itself needs no cross-remote
-coordination. Getting the *option* to every remote in a `--branches=all`
-clone is a separate concern — see "Propagating to `--branches=all`" below.
+coordination. Getting the *option* to every remote is a separate concern —
+see §4 below.
 
-### 4. Propagating to `--branches=all`
+### 4. Reaching every remote: `--branches=all` and `branch --init --all`
 
-`RemoteOptions` is a `[StructureMapSingleton]`, so `--keep-empty-folders`
-parsed on the `clone` command line is visible to `Clone`, `Fetch`, and `Init`
-automatically. It is **not** visible to remotes created via
-`--branches=all`, and this is not a mechanics problem solvable by the
-per-remote independence described above — it's a wiring gap:
+> **This section was rewritten after implementation.** An earlier version of
+> this design described threading `RemoteOptions` through `Clone`/`QuickClone`
+> and adding an `InitBranch.KeepEmptyFolders` property fed by `Clone.Run()`.
+> That mechanism was abandoned mid-implementation: its diagnosis was wrong on
+> the facts (see below), and none of `Clone.cs`, `QuickClone.cs`, or
+> `InitBranch.cs` needed to change at all. What follows is what actually
+> shipped.
 
-`Clone.Run()` (`src/GitTfs/Commands/Clone.cs`), when `BranchStrategy.All`,
-calls `_initBranch.Run()` as a direct C# method call — no command-line
-re-parsing happens, so `InitBranch`'s own `OptionSet` never gets a chance to
-parse anything for this invocation. And `InitBranch.InitFromDefaultRemote()`
-unconditionally does `_remoteOptions = new RemoteOptions();`, a fresh,
-disconnected instance — not the injected singleton. For options like
-`--ignore-regex`, this is masked by a fallback: `InitFromDefaultRemote()`
-recovers the value from the trunk remote's *persisted* config
-(`defaultRemote.IgnoreRegexExpression`). `--keep-empty-folders` was
-deliberately never persisted (see "Non-goals"), so there is nothing
-equivalent to fall back to — without explicit propagation, every branch
-discovered by `--branches=all` silently gets `KeepEmptyFolders = false`
-regardless of the CLI flag, while the trunk remote (fetched directly by
-`Clone`/`Fetch` before `InitBranch` runs) gets it correctly. No error, no
-warning — just quietly wrong output for every branch but the trunk.
+`RemoteOptions` is a `[StructureMapSingleton]`. `GitRepository.BuildRemote`
+resolves *every* `GitTfsRemote` through the DI container, and nothing ever
+explicitly overrides `RemoteOptions` when it does — so the singleton carrying
+the parsed `--keep-empty-folders` is already shared by every remote built
+during a single command invocation, trunk and auto-discovered branch alike.
+The `InitBranch.InitFromDefaultRemote()` line `_remoteOptions = new
+RemoteOptions()` builds a fresh instance that `InitBranch` passes to
+`defaultRemote.InitBranch(...)`, but that instance never becomes the
+`_remoteOptions` a `GitTfsRemote` reads for this option. Consequently the
+in-process `clone --branches=all --keep-empty-folders` path **already worked
+with zero code changes** — confirmed by writing
+`BranchesAllPropagatesKeepEmptyFolders` first and watching it pass against
+unmodified code, which is exactly what the abandoned design's premise said
+could not happen.
 
-The fix: `Clone` takes `RemoteOptions` as a constructor dependency (the same
-injected singleton `Fetch`/`Init` already read from), and `Clone.Run()`
-sets `_initBranch.KeepEmptyFolders = _remoteOptions.KeepEmptyFolders;`
-immediately before calling `_initBranch.Run()`. `InitBranch` gets its own
-`KeepEmptyFolders` property and `--keep-empty-folders` `OptionSet` entry
-(so `branch --init` also supports the flag standalone, consistent with
-`--ignore-regex`'s treatment there), and `InitFromDefaultRemote()` applies
-it unconditionally onto the fresh `RemoteOptions` it builds per branch — no
-if/else fallback needed, unlike `IgnoreRegex`, since there's nothing to fall
-back to. `QuickClone` (`src/GitTfs/Commands/QuickClone.cs`), which
-subclasses `Clone` and constructs it directly with a `null` `InitBranch`,
-also needs `RemoteOptions` threaded through its own constructor to satisfy
-`Clone`'s new dependency.
+Adding an `--keep-empty-folders` entry to `InitBranch.OptionSet` would also
+have been dead code: `InitBranch` carries no `[Pluggable]` attribute, so it is
+never dispatched as a CLI command and its `OptionSet` is never parsed from a
+command line.
 
-This fix and the rest of this design's mechanics have been validated
-end-to-end against the codebase (see "Validation" below).
+The one genuine gap was a *different* entry point: standalone
+`git tfs branch --init --all`, run as its own process. `Branch`
+(`src/GitTfs/Commands/Branch.cs`) is the `[Pluggable]` command that handles
+it, and its `OptionSet` simply had no `--keep-empty-folders` entry, so the
+flag was rejected/ignored and never reached the injected singleton.
+
+**The fix that shipped is one file, two small edits:** `Branch` takes
+`RemoteOptions` as a constructor dependency (mirroring `Fetch`'s existing
+pattern), and gains one `OptionSet` entry:
+
+```csharp
+{ "keep-empty-folders", "...", v => _remoteOptions.KeepEmptyFolders = v != null },
+```
+
+That entry writes *directly* to the injected singleton rather than to a
+`Branch`-local property forwarded via `SetInitBranchParameters()` like every
+sibling option, precisely because `GitTfsRemote` reads the live DI singleton
+for this option and not anything `InitBranch` holds. A one-line comment above
+the entry records that reason in the source.
 
 ### 5. Why "amend the tip commit" instead of "add one more commit on top"
 
@@ -291,14 +323,34 @@ retroactively reported as failed over a placeholder-file concern.
   pushed back to TFS via `checkin`/`rcheckin`, will push the literal
   `.gitkeep` file into TFVC rather than being treated as empty. Deferred to
   a follow-up if it turns out to matter in practice.
+- **Subtree remotes are unsupported.** `--keep-empty-folders` on a remote
+  where `IsSubtree || IsSubtreeOwner` skips reconciliation entirely and logs
+  a warning, for the path-prefix mismatch explained in §3 step 2. Empty
+  folders in a subtree remote are dropped exactly as they are without the
+  option; nothing is written at a wrong path and nothing existing is deleted.
 - **A real, intentionally-versioned TFVC file named exactly `.gitkeep`** is
-  indistinguishable from this feature's own placeholder across separate
-  git-tfs invocations (no provenance tracking is persisted). The specific
-  destructive case — a folder holding one real `.gitkeep` alone, which later
-  gains its first other real file — would incorrectly delete that real
-  file. Given how unusual intentionally versioning a file with this exact
-  git-convention name in TFVC would be, this is documented as a known
-  limitation rather than solved with provenance tracking.
+  indistinguishable from this feature's own placeholder once it is in the git
+  tree (no provenance tracking is persisted). *An earlier draft of this
+  document described the destructive case as needing a later
+  content-gaining event; that was wrong — it fired on the very first
+  reconciliation.* If TFVC holds a real `docs/.gitkeep` and nothing else lives
+  in `docs`, the raw listing gives `docs` a real child, so
+  `GetGitKeepPaths` correctly omits `docs/.gitkeep` from the "should have"
+  set — which put it straight into the remove set. **This is now fixed:**
+  reconciliation materializes the full tree once and excludes every path that
+  is a real TFVC *file* matching `IsGitKeepPath` from the remove set, so a
+  versioned `.gitkeep` is never deleted, whether its folder is otherwise
+  empty or not.
+
+  The residual (much narrower) case is a *stale* one, not a destructive one,
+  and only arises across invocations: if a real TFVC `.gitkeep` is deleted or
+  renamed away in TFVC, and by that same changeset its folder becomes
+  genuinely empty, the entry left in the git tree is now this feature's own
+  placeholder in effect — correct output, arrived at by coincidence. The
+  converse, a real `.gitkeep` that disappears from TFVC while its folder still
+  has other content, *is* correctly removed, because it is no longer in the
+  raw listing and therefore no longer protected. No case remains in which a
+  file that still exists in TFVC gets dropped from the git tree.
 - **No retroactive backfill**, per the safety boundary above.
 - **Git notes from `--export` metadata on the amended commit are orphaned.**
   `GitTfsRemote.ProcessChangeset` (`GitTfsRemote.cs:525`) attaches a git note
@@ -311,15 +363,32 @@ retroactively reported as failed over a placeholder-file concern.
 
 ## Validation
 
-Every mechanism in this design (`EmptyFolderTracker`, the `RemoteOptions`/
-`GitTfsRemote` wiring, the tip-commit-amend logic, the third early-return
-fix, and the `--branches=all` propagation fix) was implemented against the
-actual codebase and run against the fake-TFS-server integration harness
-before being written up here — not just reasoned about. That surfaced one
-infrastructure gap not caused by this feature but blocking its tests (see
-next paragraph), and confirmed everything else in this document works
-exactly as designed, including the resume-safety and safety-boundary
-properties.
+Most mechanisms in this design (`EmptyFolderTracker`, the `RemoteOptions`/
+`GitTfsRemote` wiring, the tip-commit-amend logic, and the third early-return
+fix) were implemented against the actual codebase and run against the
+fake-TFS-server integration harness before being written up here — not just
+reasoned about. That surfaced one infrastructure gap not caused by this
+feature but blocking its tests (see next paragraph), and confirmed the
+resume-safety and safety-boundary properties.
+
+**The `--branches=all` part of that validation did not hold, and this
+document originally claimed it did.** The design-phase spike applied a fix
+(threading `RemoteOptions` through `Clone`/`QuickClone` into an
+`InitBranch.KeepEmptyFolders` property) *without first confirming a failing
+baseline* — it never checked that the scenario was broken before "fixing"
+it, then reported the passing result as validation. The premise was wrong:
+`GitRepository.BuildRemote` resolves every remote through the DI container
+with `RemoteOptions` never overridden, so `clone --branches=all
+--keep-empty-folders` already worked, and `InitBranch.OptionSet` is never
+CLI-parsed at all (no `[Pluggable]`). The real gap — the standalone
+`branch --init --all` entry point — and its actual one-file fix were only
+found during implementation, by writing the test first and watching which
+scenario genuinely failed. See §4 for what shipped.
+
+This is recorded rather than quietly deleted because it is the useful lesson
+here: a design-time "validation spike" that skips the red step proves
+nothing, and stating its result as validated fact papered over a wrong root
+cause that only disciplined TDD caught later.
 
 **The fake TFS harness (`src/GitTfs.VsFake/TfsHelper.VsFake.cs`) could not
 run any test depending on `GetFullTree()`/`GetItems` before this feature.**

@@ -29,6 +29,9 @@ The fetch command fetch all the new changesets from a TFS remote
 								 Don't initialize additional branches (only use what already was initialized)
       --ignore-restricted-changesets
                  Ignore changesets that the TFS user has no read access to
+          --keep-empty-folders   Add a .gitkeep placeholder to TFVC folders that
+                                   have no real content, so they survive into git
+                                   (see [clone](clone.md#keep-empty-folders))
       -u, --username=VALUE       TFS user name
       -p, --password=VALUE       TFS password
 ## Examples
