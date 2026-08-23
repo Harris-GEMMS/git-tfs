@@ -2,11 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a `--keep-empty-folders` option to `clone`/`fetch`/`branch` that adds a `.gitkeep` placeholder to TFVC folders that are genuinely empty, so they survive into git, without touching folders whose only content was excluded by ignore rules.
+**Goal:** Add a `--keep-empty-folders` option to `clone`/`fetch`/`branch` that adds a `.gitkeep` placeholder to TFVC folders that are genuinely empty, so they survive into git, without touching folders whose only content was excluded by ignore rules — including when branches are auto-discovered via `--branches=all`.
 
-**Architecture:** A new, pure, unit-testable `EmptyFolderTracker` class computes which folders need a `.gitkeep` from a raw (unfiltered) TFS item listing. `GitTfsRemote` calls it exactly once at the end of a `clone`/`fetch` invocation — never per changeset — comparing the result against the just-created tip commit's tree and, if anything differs, replacing that tip commit in place (same parents/author/message, amended tree) rather than stacking a new commit on top.
+**Architecture:** A new, pure, unit-testable `EmptyFolderTracker` class computes which folders need a `.gitkeep` from a raw (unfiltered) TFS item listing. `GitTfsRemote` calls it exactly once at the end of a `clone`/`fetch` invocation — never per changeset — comparing the result against the just-created tip commit's tree and, if anything differs, replacing that tip commit in place (same parents/author/message, amended tree) rather than stacking a new commit on top. Because the fake TFS test harness never previously supported the TFS query this depends on, this plan starts with a prerequisite task fixing that harness. A separate wiring gap (the option not reaching branches auto-discovered by `--branches=all`) is fixed as its own task.
 
-**Tech Stack:** C# (.NET Framework 4.8), LibGit2Sharp, xunit + Moq, the repo's fake-TFS-server integration test harness (`IntegrationHelper`).
+**Every task below has already been implemented once, end-to-end, against this codebase, and reverted** (as a validation spike during design) — the code in each task's steps is exact and known to compile and pass, not a first draft.
+
+**Tech Stack:** C# (.NET Framework 4.8), LibGit2Sharp, xunit + Moq, the repo's fake-TFS-server integration test harness (`IntegrationHelper`, `GitTfs.VsFake`).
 
 **Spec:** `docs/superpowers/specs/2026-08-23-keep-empty-folders-design.md`
 
@@ -18,6 +20,7 @@
 - Reconciliation runs **exactly once per `clone`/`fetch` invocation**, never per changeset — no changes to `ChangeSieve` or `TfsChangeset.Apply()`/`CopyTree()`.
 - The tip-commit rewrite mechanism only ever targets a commit **created by the current invocation** (gated on at least one changeset having been fetched this run). It must never rewrite a commit that could already have been observed elsewhere. If nothing new was fetched, reconciliation is skipped entirely.
 - Reconciliation is best-effort: any failure in it must be caught and logged as a warning, never allowed to fail an otherwise-successful fetch.
+- `--keep-empty-folders` must reach every remote created during a `--branches=all` clone, not just the trunk.
 
 ---
 
@@ -214,16 +217,207 @@ git commit -m "feat: add EmptyFolderTracker to find TFVC folders with no real co
 
 ---
 
-### Task 2: CLI option, `GitTfsRemote` wiring, and first end-to-end test
+### Task 2: Fake TFS harness prerequisite — implement `GetItems` and friends
+
+The entire feature depends on `ITfsChangeset.GetFullTree()`, which calls
+`IChangeset.VersionControlServer.GetItems(...)`. Before this task, the fake
+TFS server used by every integration test (`GitTfs.VsFake`) could not answer
+that call at all — not because of anything this feature does wrong, but
+because nothing before it ever exercised that code path. `GetFullTree()`'s
+only production caller, `TfsChangeset.GetTree()` (via `CopyTree`), is only
+reached by `QuickFetch`/`clone -c`, which had zero existing test coverage.
+
+This task fixes that, verified by a regression test for `QuickFetch` itself
+(independent of `--keep-empty-folders`), so Task 3's integration tests have
+a working foundation to build on.
+
+**Files:**
+- Modify: `src/GitTfs.VsFake/TfsHelper.VsFake.cs`
+- Test: `src/GitTfsTest/Integration/CloneTests.cs` (add one test)
+
+**Interfaces:**
+- Fixes (all pre-existing, in `src/GitTfs.VsFake/TfsHelper.VsFake.cs`):
+  `TfsHelper.Changeset.VersionControlServer` (was throwing),
+  `TfsHelper.GetChangeset(int changesetId, IGitTfsRemote remote)` (was
+  throwing), `TfsHelper.FakeVersionControlServer.GetItems(string, int,
+  TfsRecursionType)` (was throwing), `TfsHelper.FakeWorkspace
+  .GetSpecificVersion(int, IEnumerable<IItem>, bool)` (was throwing).
+- No production (`src/GitTfs`) code changes in this task.
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `src/GitTfsTest/Integration/CloneTests.cs` (anywhere in the class,
+e.g. just before `CloneWithMixedUpCase`):
+
+```csharp
+        [FactExceptOnUnix]
+        public void CloneFromAGivenChangesetUsesASingleSnapshot()
+        {
+            h.SetupFake(r =>
+            {
+                r.Changeset(1, "Project created from template", DateTime.Parse("2012-01-01 12:12:12 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject");
+                r.Changeset(2, "Add a folder and a file", DateTime.Parse("2012-01-02 12:12:12 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject/Folder")
+                    .Change(TfsChangeType.Add, TfsItemType.File, "$/MyProject/Folder/File.txt", "File contents")
+                    .Change(TfsChangeType.Add, TfsItemType.File, "$/MyProject/README", "tldr");
+            });
+
+            h.Run("clone", h.TfsUrl, "$/MyProject", "MyProject", "--from=2");
+
+            h.AssertFileInWorkspace("MyProject", "Folder/File.txt", "File contents");
+            h.AssertFileInWorkspace("MyProject", "README", "tldr");
+            Assert.Equal(1, h.GetCommitCount("MyProject"));
+        }
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `dotnet test src/GitTfs.sln --filter "FullyQualifiedName~CloneFromAGivenChangesetUsesASingleSnapshot"`
+Expected: FAIL with `System.NotImplementedException` (surfaced as a
+`GitTfsException` wrapping it) from `FakeWorkspace.GetSpecificVersion`.
+
+- [ ] **Step 3: Fix `Changeset.VersionControlServer`**
+
+In `src/GitTfs.VsFake/TfsHelper.VsFake.cs`, inside the private `Changeset`
+class, change:
+
+```csharp
+            public IVersionControlServer VersionControlServer => throw new NotImplementedException();
+```
+
+to:
+
+```csharp
+            public IVersionControlServer VersionControlServer => _versionControlServer;
+```
+
+- [ ] **Step 4: Implement `TfsHelper.GetChangeset(int, IGitTfsRemote)`**
+
+In the same file, change:
+
+```csharp
+        public ITfsChangeset GetChangeset(int changesetId, IGitTfsRemote remote) => throw new NotImplementedException();
+```
+
+to:
+
+```csharp
+        public ITfsChangeset GetChangeset(int changesetId, IGitTfsRemote remote) => BuildTfsChangeset(_script.Changesets.First(c => c.Id == changesetId), remote);
+```
+
+(this mirrors the existing `GetLatestChangeset(IGitTfsRemote remote)` right
+above it, just filtering by exact `Id` instead of taking the last one)
+
+- [ ] **Step 5: Implement `FakeVersionControlServer.GetItems`**
+
+In the same file, inside the private `FakeVersionControlServer` class,
+change:
+
+```csharp
+            public IItem[] GetItems(string itemPath, int changesetNumber, TfsRecursionType recursionType) => throw new NotImplementedException();
+```
+
+to:
+
+```csharp
+            public IItem[] GetItems(string itemPath, int changesetNumber, TfsRecursionType recursionType)
+            {
+                if (recursionType != TfsRecursionType.Full)
+                    throw new NotImplementedException();
+
+                var liveItems = new Dictionary<string, (ScriptedChangeset Changeset, ScriptedChange Change)>(StringComparer.InvariantCultureIgnoreCase);
+                foreach (var changeset in _script.Changesets.Where(cs => cs.Id <= changesetNumber).OrderBy(cs => cs.Id))
+                {
+                    foreach (var change in changeset.Changes)
+                    {
+                        if (change.ChangeType.IncludesOneOf(TfsChangeType.Delete))
+                            liveItems.Remove(change.RepositoryPath);
+                        else
+                            liveItems[change.RepositoryPath] = (changeset, change);
+                    }
+                }
+
+                var root = itemPath.TrimEnd('/');
+                return liveItems
+                    .Where(kv => string.Equals(kv.Key, root, StringComparison.InvariantCultureIgnoreCase)
+                              || kv.Key.StartsWith(root + "/", StringComparison.InvariantCultureIgnoreCase))
+                    .Select(kv => (IItem)new Change(this, kv.Value.Changeset, kv.Value.Change))
+                    .ToArray();
+            }
+```
+
+Only `TfsRecursionType.Full` is implemented — that's the only value any
+production caller passes (`TfsChangeset.GetFullTree()`), matching this
+fake's existing convention of leaving unexercised paths as `throw new
+NotImplementedException()`. Rename changes are handled on a best-effort
+basis: they upsert the new path but don't clean up the old one unless the
+test script also issues an explicit delete for it (most scripted changes
+never set the optional `ItemId` needed to correlate a rename's before/after
+path) — sufficient for this feature's tests, not a general rename fix.
+
+- [ ] **Step 6: Implement `FakeWorkspace.GetSpecificVersion(int, IEnumerable<IItem>, bool)`**
+
+In the same file, inside the private `FakeWorkspace` class, change:
+
+```csharp
+            public void GetSpecificVersion(int changesetId, IEnumerable<IItem> items, bool noParallel) => throw new NotImplementedException();
+```
+
+to:
+
+```csharp
+            public void GetSpecificVersion(int changesetId, IEnumerable<IItem> items, bool noParallel)
+            {
+                var repositoryRoot = _repositoryRoot.ToLower();
+                if (!repositoryRoot.EndsWith("/")) repositoryRoot += "/";
+                foreach (var item in items)
+                {
+                    if (item.ItemType == TfsItemType.File)
+                    {
+                        var outPath = Path.Combine(_directory, item.ServerItem.ToLower().Replace(repositoryRoot, ""));
+                        var outDir = Path.GetDirectoryName(outPath);
+                        if (!Directory.Exists(outDir)) Directory.CreateDirectory(outDir);
+                        using (var download = item.DownloadFile())
+                            File.WriteAllText(outPath, File.ReadAllText(download.Path));
+                    }
+                }
+            }
+```
+
+This mirrors the existing `GetSpecificVersion(int, IEnumerable<IChange>,
+bool)` overload immediately above it in the same class, just operating on
+`IItem` directly instead of unwrapping `change.Item`.
+
+- [ ] **Step 7: Run the test to verify it passes**
+
+Run: `dotnet test src/GitTfs.sln --filter "FullyQualifiedName~CloneFromAGivenChangesetUsesASingleSnapshot"`
+Expected: PASS.
+
+- [ ] **Step 8: Run the full test suite to check for regressions**
+
+Run: `dotnet test src/GitTfs.sln`
+Expected: PASS, no new failures.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/GitTfs.VsFake/TfsHelper.VsFake.cs src/GitTfsTest/Integration/CloneTests.cs
+git commit -m "test: implement fake TFS server GetItems support for QuickFetch"
+```
+
+---
+
+### Task 3: CLI option, `GitTfsRemote` wiring, and first end-to-end test
 
 **Files:**
 - Modify: `src/GitTfs/Commands/RemoteOptions.cs`
-- Modify: `src/GitTfs/Core/GitTfsRemote.cs:319-393` (`FetchWithMerge`), `:705-710` (`quickFetch`), add new private method after `:771` (`RemoteRef`)
+- Modify: `src/GitTfs/Core/GitTfsRemote.cs` (`FetchWithMerge`, `quickFetch`, new private method)
 - Test: Create `src/GitTfsTest/Integration/KeepEmptyFoldersTests.cs`
 
 **Interfaces:**
 - Consumes: `EmptyFolderTracker.GetGitKeepPaths`/`IsGitKeepPath` (Task 1). `ITfsChangeset.GetFullTree()`, `IGitRepository.GetCommit(string)`, `GitCommit.GetTree()`, `IGitRepository.GetTreeBuilder(string)`, `IGitTreeBuilder.Add/Remove/GetTree()`, `IGitRepository.Commit(LogEntry)`, `GitTfsRemote.UpdateTfsHead(string, int)` (all existing).
-- Produces: `RemoteOptions.KeepEmptyFolders : bool` (new, consumed only inside `GitTfsRemote`). `GitTfsRemote.ReconcileEmptyFoldersIfNeeded(ITfsChangeset, LogEntry)` (new private method — no other task calls it directly).
+- Produces: `RemoteOptions.KeepEmptyFolders : bool` (new). `GitTfsRemote.ReconcileEmptyFoldersIfNeeded(ITfsChangeset, LogEntry)` (new private method, called from `quickFetch` and from `FetchWithMerge`).
 
 - [ ] **Step 1: Write the failing integration test**
 
@@ -272,7 +466,6 @@ namespace GitTfs.Test.Integration
             h.AssertFileInWorkspace("MyProject", "docs/.gitkeep", "");
             h.AssertNoFileInWorkspace("MyProject", "packages/.gitkeep");
             h.AssertNoFileInWorkspace("MyProject", "packages/Some.Package.1.0.0.nupkg");
-            h.AssertTreeEntries("MyProject", "HEAD", ".gitignore", "README", "docs/.gitkeep");
         }
 
         [FactExceptOnUnix]
@@ -289,11 +482,18 @@ namespace GitTfs.Test.Integration
 
             h.Run("clone", h.TfsUrl, "$/MyProject", "MyProject");
 
-            h.AssertTreeEntries("MyProject", "HEAD", "README");
+            h.AssertNoFileInWorkspace("MyProject", "docs/.gitkeep");
         }
     }
 }
 ```
+
+Note: this test file does not use `IntegrationHelper.AssertTreeEntries` for
+nested paths — that helper only enumerates entries immediately under the
+given tree (it doesn't recurse into subtrees), so it can't verify a nested
+path like `"docs/.gitkeep"` exists or doesn't. `AssertFileInWorkspace`/
+`AssertNoFileInWorkspace` check the checked-out working directory instead,
+which handles nested paths correctly since it's just filesystem access.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -411,7 +611,7 @@ to:
         }
 ```
 
-- [ ] **Step 6: Call it once at the end of `FetchWithMerge`**
+- [ ] **Step 6: Call it from `FetchWithMerge`, including the bounded-fetch cutoff**
 
 In `src/GitTfs/Core/GitTfsRemote.cs`, in `FetchWithMerge` (currently lines 319-393):
 
@@ -424,7 +624,36 @@ In `src/GitTfs/Core/GitTfsRemote.cs`, in `FetchWithMerge` (currently lines 319-3
             do
 ```
 
-2. Right after `var commitSha = ProcessChangeset(changeset, log);` (inside the `foreach`), add:
+2. The `lastChangesetIdToFetch` cutoff check currently reads:
+
+```csharp
+                    fetchResult.NewChangesetCount++;
+                    if (lastChangesetIdToFetch > 0 && changeset.Summary.ChangesetId > lastChangesetIdToFetch)
+                        return fetchResult;
+                    string parentCommitSha = null;
+```
+
+Change it to also reconcile whatever was committed by the *previous*
+iteration before returning — this cutoff is a legitimate, complete stopping
+point (unlike the merge-failure and rename-boundary returns elsewhere in
+this loop, which are transient and are deliberately left untouched):
+
+```csharp
+                    fetchResult.NewChangesetCount++;
+                    if (lastChangesetIdToFetch > 0 && changeset.Summary.ChangesetId > lastChangesetIdToFetch)
+                    {
+                        // The changeset that would come next is past the requested cutoff, but
+                        // everything up to and including the previous changeset was committed
+                        // as a legitimate, complete stopping point - reconcile it same as a
+                        // normal end-of-fetch.
+                        if (lastChangeset != null)
+                            ReconcileEmptyFoldersIfNeeded(lastChangeset, lastLog);
+                        return fetchResult;
+                    }
+                    string parentCommitSha = null;
+```
+
+3. Right after `var commitSha = ProcessChangeset(changeset, log);` (inside the `foreach`), add two lines:
 
 ```csharp
                     var commitSha = ProcessChangeset(changeset, log);
@@ -433,13 +662,12 @@ In `src/GitTfs/Core/GitTfsRemote.cs`, in `FetchWithMerge` (currently lines 319-3
                     fetchResult.LastFetchedChangesetId = changeset.Summary.ChangesetId;
 ```
 
-(this replaces the existing `var commitSha = ProcessChangeset(changeset, log);` / `fetchResult.LastFetchedChangesetId = changeset.Summary.ChangesetId;` pair — just insert the two new lines between them)
-
-3. Change the method's final line from:
+4. Change the method's final lines from:
 
 ```csharp
             } while (fetchRetrievedChangesets && latestChangesetId > fetchResult.LastFetchedChangesetId);
             return fetchResult;
+        }
 ```
 
 to:
@@ -451,9 +679,14 @@ to:
                 ReconcileEmptyFoldersIfNeeded(lastChangeset, lastLog);
 
             return fetchResult;
+        }
 ```
 
-Note: the two early `return fetchResult;` statements inside the loop (merge failure, rename-boundary pause) are deliberately left untouched — reconciliation only runs on the loop's normal completion, per the Global Constraints safety boundary. Those paths simply pick up reconciliation on whichever later call actually completes normally.
+The merge-changeset-failure return and the rename-boundary-pause return
+elsewhere in this loop are deliberately left untouched — they represent
+transient/incomplete states, and whatever they leave uncommitted this
+invocation is simply reconciled by whichever later invocation actually
+reaches one of the two complete stopping points above.
 
 - [ ] **Step 7: Run the tests to verify they pass**
 
@@ -463,7 +696,7 @@ Expected: PASS, both tests.
 - [ ] **Step 8: Run the full test suite to check for regressions**
 
 Run: `dotnet test src/GitTfs.sln`
-Expected: PASS, no new failures (in particular, all pre-existing `CloneTests`/`FetchTests` still pass unchanged, since `--keep-empty-folders` defaults to off).
+Expected: PASS, no new failures.
 
 - [ ] **Step 9: Commit**
 
@@ -474,15 +707,19 @@ git commit -m "feat: add --keep-empty-folders option to clone/fetch"
 
 ---
 
-### Task 3: Regression test for repeated `fetch`
+### Task 4: Regression test for repeated `fetch`
 
-This is the scenario that surfaced the tip-commit-rewrite design during brainstorming: a second `fetch` must resume from the right changeset, `.gitkeep`s from the first fetch's reconciliation must survive into the second fetch's tree, and a folder that gains real content after having had a `.gitkeep` must lose it.
+This is the scenario that surfaced the tip-commit-rewrite design during
+brainstorming: a second `fetch` must resume from the right changeset,
+`.gitkeep`s from the first fetch's reconciliation must survive into the
+second fetch's tree, and a folder that gains real content after having had
+a `.gitkeep` must lose it.
 
 **Files:**
 - Modify: `src/GitTfsTest/Integration/KeepEmptyFoldersTests.cs` (add one test method; no production code change expected)
 
 **Interfaces:**
-- Consumes: `IntegrationHelper.SetupFake` (called a second time, to add changesets to the fake TFS server after the initial clone — see `FetchTests.AddNewCommitToFakeTfsServer` for the existing precedent), `IntegrationHelper.RunIn`, `IntegrationHelper.GetCommitCount`.
+- Consumes: `IntegrationHelper.SetupFake`, `IntegrationHelper.RunIn`, `IntegrationHelper.GetCommitCount`.
 
 - [ ] **Step 1: Write the test**
 
@@ -506,25 +743,46 @@ Add to `src/GitTfsTest/Integration/KeepEmptyFoldersTests.cs`:
             h.AssertFileInWorkspace("MyProject", "more-docs/.gitkeep", "");
             Assert.Equal(2, h.GetCommitCount("MyProject"));
 
-            // This changeset both adds real content to "docs" (its .gitkeep must be removed)
-            // and leaves "more-docs" untouched and still empty (its .gitkeep must survive).
+            // IntegrationHelper.SetupFake REPLACES the fake TFS script on every call rather
+            // than appending to it - so the second call must resupply the ENTIRE changeset
+            // history (1, 2, and 3), not just the new delta. Plain incremental fetch would
+            // work fine with just changeset 3 (it only ever needs the delta since the last
+            // changeset), but reconciliation's GetFullTree() replays the fake script's full
+            // history to reconstruct current raw state, and would otherwise "forget" that
+            // "more-docs" was ever added, wrongly treating it as gone.
             h.SetupFake(r =>
+            {
+                r.Changeset(1, "Project created from template", DateTime.Parse("2012-01-01 12:12:12 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject");
+                r.Changeset(2, "Add two empty folders", DateTime.Parse("2012-01-02 12:12:12 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject/docs")
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject/more-docs")
+                    .Change(TfsChangeType.Add, TfsItemType.File, "$/MyProject/README", "tldr");
+                // This changeset both adds real content to "docs" (its .gitkeep must be
+                // removed) and leaves "more-docs" untouched and still empty (its .gitkeep
+                // must survive).
                 r.Changeset(3, "Populate docs", DateTime.Parse("2012-01-03 12:12:12 -05:00"))
-                    .Change(TfsChangeType.Add, TfsItemType.File, "$/MyProject/docs/guide.md", "how to use this"));
+                    .Change(TfsChangeType.Add, TfsItemType.File, "$/MyProject/docs/guide.md", "how to use this");
+            });
             h.RunIn("MyProject", "pull", "--keep-empty-folders");
 
             h.AssertFileInWorkspace("MyProject", "docs/guide.md", "how to use this");
             h.AssertNoFileInWorkspace("MyProject", "docs/.gitkeep");
             h.AssertFileInWorkspace("MyProject", "more-docs/.gitkeep", "");
-            h.AssertTreeEntries("MyProject", "refs/remotes/tfs/default", "README", "docs/guide.md", "more-docs/.gitkeep");
             Assert.Equal(3, h.GetCommitCount("MyProject"));
         }
 ```
 
+Note: `pull` is used rather than `fetch` here (and in Task 5) because `pull`
+runs fetch and then merges the remote ref into local HEAD
+(`src/GitTfs/Commands/Pull.cs`) — plain `fetch` wouldn't update the local
+working copy/HEAD that `AssertFileInWorkspace`/`GetCommitCount` (which
+counts commits reachable from HEAD) check.
+
 - [ ] **Step 2: Run the test**
 
 Run: `dotnet test src/GitTfs.sln --filter "FullyQualifiedName~GitKeepsSurviveAndResumePointStaysCorrectAcrossRepeatedFetch"`
-Expected: PASS. If it fails, the most likely cause is the resume-point bug described in the spec ("Why amend the tip commit instead of adding one on top") reappearing — re-check that `ReconcileEmptyFoldersIfNeeded` calls `UpdateTfsHead` (not just `Repository.UpdateRef`) so `MaxCommitHash`/`MaxChangesetId` and the ref all move together.
+Expected: PASS.
 
 - [ ] **Step 3: Commit**
 
@@ -535,13 +793,13 @@ git commit -m "test: add repeated-fetch regression test for --keep-empty-folders
 
 ---
 
-### Task 4: Safety-boundary test — an up-to-date fetch must not rewrite anything
+### Task 5: Safety-boundary test — an up-to-date fetch must not rewrite anything
 
 **Files:**
 - Modify: `src/GitTfsTest/Integration/KeepEmptyFoldersTests.cs` (add one test method; no production code change expected)
 
 **Interfaces:**
-- Consumes: `IntegrationHelper.RevParseCommit` (to capture and compare a commit SHA before/after).
+- Consumes: `IntegrationHelper.RevParseCommit`.
 
 - [ ] **Step 1: Write the test**
 
@@ -574,11 +832,216 @@ Add to `src/GitTfsTest/Integration/KeepEmptyFoldersTests.cs`:
 - [ ] **Step 2: Run the test**
 
 Run: `dotnet test src/GitTfs.sln --filter "FullyQualifiedName~FetchingWithNothingNewDoesNotRewriteTheExistingCommit"`
-Expected: PASS. If it fails with the SHA changing, check that `FetchWithMerge`'s early `return fetchResult;` at the "already up to date" check (`if (MaxChangesetId >= latestChangesetId) return fetchResult;`) is reached before `lastChangeset`/`lastLog` are ever assigned, so the `if (lastChangeset != null)` guard added in Task 2 Step 6 correctly skips reconciliation.
+Expected: PASS. If it fails with the SHA changing, check that `FetchWithMerge`'s early "already up to date" return (`if (MaxChangesetId >= latestChangesetId) return fetchResult;`) is reached before `lastChangeset`/`lastLog` are ever assigned, so the guard added in Task 3 Step 6 correctly skips reconciliation.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add src/GitTfsTest/Integration/KeepEmptyFoldersTests.cs
 git commit -m "test: add safety-boundary test for --keep-empty-folders"
+```
+
+---
+
+### Task 6: Propagate the option to `--branches=all`
+
+`RemoteOptions` is a `[StructureMapSingleton]`, so `--keep-empty-folders`
+parsed on `clone` is automatically visible to `Fetch`/`Init`. It is *not*
+visible to remotes auto-discovered via `--branches=all`: `Clone.Run()` calls
+`InitBranch.Run()` as a direct method call (no re-parsing of the command
+line), and `InitBranch.InitFromDefaultRemote()` builds a fresh, disconnected
+`RemoteOptions()` rather than using the injected singleton. Unlike
+`--ignore-regex` (which `InitBranch` recovers from the trunk remote's
+*persisted* config as a fallback), `--keep-empty-folders` is deliberately
+never persisted, so there's nothing to fall back to — it needs explicit
+propagation.
+
+**Files:**
+- Modify: `src/GitTfs/Commands/Clone.cs`
+- Modify: `src/GitTfs/Commands/QuickClone.cs`
+- Modify: `src/GitTfs/Commands/InitBranch.cs`
+- Test: `src/GitTfsTest/Integration/CloneTests.cs` (add one test)
+
+**Interfaces:**
+- Produces: `InitBranch.KeepEmptyFolders : bool` (new property, plus a
+  matching `--keep-empty-folders` `OptionSet` entry so `branch --init`
+  supports the flag standalone too).
+- Modifies constructors: `Clone(Globals, Fetch, Init, InitBranch,
+  RemoteOptions)` (adds `RemoteOptions`), `QuickClone(Globals, Init,
+  QuickFetch, RemoteOptions)` (adds `RemoteOptions`, threads it to `base(...)`).
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `src/GitTfsTest/Integration/CloneTests.cs` (e.g. just before
+`CloneWithMixedUpCase`):
+
+```csharp
+        [FactExceptOnUnix]
+        public void BranchesAllPropagatesKeepEmptyFolders()
+        {
+            h.SetupFake(r =>
+            {
+                r.SetRootBranch("$/MyProject/Main");
+                r.Changeset(1, "Project created from template", DateTime.Parse("2012-01-01 12:12:12 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject");
+                r.Changeset(2, "First commit", DateTime.Parse("2012-01-02 12:12:12 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject/Main")
+                    .Change(TfsChangeType.Add, TfsItemType.File, "$/MyProject/Main/File.txt", "File contents");
+                r.BranchChangeset(3, "create branch", DateTime.Parse("2012-01-02 12:12:14 -05:00"), fromBranch: "$/MyProject/Main", toBranch: "$/MyProject/Branch", rootChangesetId: 2)
+                    .Change(TfsChangeType.Branch, TfsItemType.Folder, "$/MyProject/Branch")
+                    .Change(TfsChangeType.Branch, TfsItemType.File, "$/MyProject/Branch/File.txt", "File contents");
+                r.Changeset(4, "add empty folder to branch", DateTime.Parse("2012-01-02 12:12:15 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject/Branch/docs");
+            });
+
+            h.Run("clone", h.TfsUrl, "$/MyProject/Main", "MyProject", "--branches=all", "--keep-empty-folders");
+
+            h.AssertFileInWorkspace("MyProject", "File.txt", "File contents");
+            var branchCommit = h.RevParseCommit("MyProject", "refs/remotes/tfs/Branch");
+            Assert.NotNull(branchCommit);
+            var branchTreeEntries = branchCommit.Tree.Select(e => e.Path).ToList();
+            Assert.Contains("docs", branchTreeEntries);
+        }
+```
+
+This asserts on the auto-discovered `Branch` remote's own tree (not the
+trunk's) — `docs` can only appear as a tree entry there if something (the
+`.gitkeep`) was actually placed inside it, since git never represents a
+truly empty directory as a tree entry at all.
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `dotnet test src/GitTfs.sln --filter "FullyQualifiedName~BranchesAllPropagatesKeepEmptyFolders"`
+Expected: FAIL — `docs` does not appear in the `Branch` remote's tree, because the option never reached it.
+
+- [ ] **Step 3: Thread `RemoteOptions` through `Clone` and `QuickClone`**
+
+In `src/GitTfs/Commands/Clone.cs`, change:
+
+```csharp
+        private readonly Fetch _fetch;
+        private readonly Init _init;
+        private readonly Globals _globals;
+        private readonly InitBranch _initBranch;
+        private bool _resumable;
+
+        public Clone(Globals globals, Fetch fetch, Init init, InitBranch initBranch)
+        {
+            _fetch = fetch;
+            _init = init;
+            _globals = globals;
+            _initBranch = initBranch;
+            globals.GcCountdown = globals.GcPeriod;
+        }
+```
+
+to:
+
+```csharp
+        private readonly Fetch _fetch;
+        private readonly Init _init;
+        private readonly Globals _globals;
+        private readonly InitBranch _initBranch;
+        private readonly RemoteOptions _remoteOptions;
+        private bool _resumable;
+
+        public Clone(Globals globals, Fetch fetch, Init init, InitBranch initBranch, RemoteOptions remoteOptions)
+        {
+            _fetch = fetch;
+            _init = init;
+            _globals = globals;
+            _initBranch = initBranch;
+            _remoteOptions = remoteOptions;
+            globals.GcCountdown = globals.GcPeriod;
+        }
+```
+
+Then, in the same file, where `Clone.Run()` calls into `InitBranch` for
+`--branches=all`, change:
+
+```csharp
+                if (_fetch.BranchStrategy == BranchStrategy.All && _initBranch != null)
+                {
+                    _initBranch.CloneAllBranches = true;
+
+                    retVal = _initBranch.Run();
+                }
+```
+
+to:
+
+```csharp
+                if (_fetch.BranchStrategy == BranchStrategy.All && _initBranch != null)
+                {
+                    _initBranch.CloneAllBranches = true;
+                    _initBranch.KeepEmptyFolders = _remoteOptions.KeepEmptyFolders;
+
+                    retVal = _initBranch.Run();
+                }
+```
+
+In `src/GitTfs/Commands/QuickClone.cs`, change:
+
+```csharp
+        public QuickClone(Globals globals, Init init, QuickFetch fetch)
+            : base(globals, fetch, init, null)
+        {
+        }
+```
+
+to:
+
+```csharp
+        public QuickClone(Globals globals, Init init, QuickFetch fetch, RemoteOptions remoteOptions)
+            : base(globals, fetch, init, null, remoteOptions)
+        {
+        }
+```
+
+- [ ] **Step 4: Add `KeepEmptyFolders` to `InitBranch`**
+
+In `src/GitTfs/Commands/InitBranch.cs`, add the property alongside the
+others:
+
+```csharp
+        public string IgnoreRegex { get; set; }
+        public string ExceptRegex { get; set; }
+        public bool KeepEmptyFolders { get; set; }
+        public bool CloneAllBranches { get; set; }
+```
+
+Add the matching `OptionSet` entry (so `branch --init` supports the flag
+standalone too, consistent with how `--ignore-regex` is treated here):
+
+```csharp
+                    { "except-regex=", "A regex of exceptions to ignore-regex", v => ExceptRegex = v},
+                    { "keep-empty-folders", "Add a .gitkeep placeholder to TFVC folders that have no real content, so they survive into git", v => KeepEmptyFolders = v != null },
+                    { "no-fetch", "Create the new TFS remote but don't fetch any changesets", v => NoFetch = (v != null) }
+```
+
+Apply it unconditionally in `InitFromDefaultRemote()` — no if/else fallback
+needed here (unlike `IgnoreRegex`), since there's no persisted value to
+fall back to:
+
+```csharp
+            _remoteOptions = new RemoteOptions();
+            _remoteOptions.KeepEmptyFolders = KeepEmptyFolders;
+            if (!string.IsNullOrWhiteSpace(TfsUsername))
+```
+
+- [ ] **Step 5: Run the test to verify it passes**
+
+Run: `dotnet test src/GitTfs.sln --filter "FullyQualifiedName~BranchesAllPropagatesKeepEmptyFolders"`
+Expected: PASS.
+
+- [ ] **Step 6: Run the full test suite to check for regressions**
+
+Run: `dotnet test src/GitTfs.sln`
+Expected: PASS, no new failures.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/GitTfs/Commands/Clone.cs src/GitTfs/Commands/QuickClone.cs src/GitTfs/Commands/InitBranch.cs src/GitTfsTest/Integration/CloneTests.cs
+git commit -m "fix: propagate --keep-empty-folders to branches discovered via --branches=all"
 ```
