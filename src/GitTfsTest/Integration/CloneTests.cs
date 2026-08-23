@@ -135,6 +135,68 @@ namespace GitTfs.Test.Integration
         }
 
         [FactExceptOnUnix]
+        public void BranchesAllPropagatesKeepEmptyFolders()
+        {
+            h.SetupFake(r =>
+            {
+                r.SetRootBranch("$/MyProject/Main");
+                r.Changeset(1, "Project created from template", DateTime.Parse("2012-01-01 12:12:12 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject");
+                r.Changeset(2, "First commit", DateTime.Parse("2012-01-02 12:12:12 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject/Main")
+                    .Change(TfsChangeType.Add, TfsItemType.File, "$/MyProject/Main/File.txt", "File contents");
+                r.BranchChangeset(3, "create branch", DateTime.Parse("2012-01-02 12:12:14 -05:00"), fromBranch: "$/MyProject/Main", toBranch: "$/MyProject/Branch", rootChangesetId: 2)
+                    .Change(TfsChangeType.Branch, TfsItemType.Folder, "$/MyProject/Branch")
+                    .Change(TfsChangeType.Branch, TfsItemType.File, "$/MyProject/Branch/File.txt", "File contents");
+                r.Changeset(4, "add empty folder to branch", DateTime.Parse("2012-01-02 12:12:15 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject/Branch/docs");
+            });
+
+            h.Run("clone", h.TfsUrl, "$/MyProject/Main", "MyProject", "--branches=all", "--keep-empty-folders");
+
+            h.AssertFileInWorkspace("MyProject", "File.txt", "File contents");
+            var branchCommit = h.RevParseCommit("MyProject", "refs/remotes/tfs/Branch");
+            Assert.NotNull(branchCommit);
+            var branchTreeEntries = branchCommit.Tree.Select(e => e.Path).ToList();
+            Assert.Contains("docs", branchTreeEntries);
+        }
+
+        [FactExceptOnUnix]
+        public void StandaloneBranchInitAllPropagatesKeepEmptyFolders()
+        {
+            h.SetupFake(r =>
+            {
+                r.SetRootBranch("$/MyProject/Main");
+                r.Changeset(1, "Project created from template", DateTime.Parse("2012-01-01 12:12:12 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject");
+                r.Changeset(2, "First commit", DateTime.Parse("2012-01-02 12:12:12 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject/Main")
+                    .Change(TfsChangeType.Add, TfsItemType.File, "$/MyProject/Main/File.txt", "File contents");
+                r.BranchChangeset(3, "create branch", DateTime.Parse("2012-01-02 12:12:14 -05:00"), fromBranch: "$/MyProject/Main", toBranch: "$/MyProject/Branch", rootChangesetId: 2)
+                    .Change(TfsChangeType.Branch, TfsItemType.Folder, "$/MyProject/Branch")
+                    .Change(TfsChangeType.Branch, TfsItemType.File, "$/MyProject/Branch/File.txt", "File contents");
+                r.Changeset(4, "add empty folder to branch", DateTime.Parse("2012-01-02 12:12:15 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject/Branch/docs");
+            });
+
+            // Plain clone, no --branches=all and no --keep-empty-folders: only "Main" is
+            // fetched, and "Branch" is left undiscovered (there's no merge-back changeset to
+            // auto-detect it during this clone).
+            h.Run("clone", h.TfsUrl, "$/MyProject/Main", "MyProject");
+            h.AssertFileInWorkspace("MyProject", "File.txt", "File contents");
+            Assert.DoesNotContain(h.Repository("MyProject").Refs, r => r.CanonicalName == "refs/remotes/tfs/Branch");
+
+            // Now discover and initialize "Branch" as a separate, standalone follow-up command
+            // (its own process/container) - this is the scenario the fix targets.
+            h.RunIn("MyProject", "branch", "--init", "--all", "--keep-empty-folders");
+
+            var branchCommit = h.RevParseCommit("MyProject", "refs/remotes/tfs/Branch");
+            Assert.NotNull(branchCommit);
+            var branchTreeEntries = branchCommit.Tree.Select(e => e.Path).ToList();
+            Assert.Contains("docs", branchTreeEntries);
+        }
+
+        [FactExceptOnUnix]
         public void CloneWithMixedUpCase()
         {
             h.SetupFake(r =>

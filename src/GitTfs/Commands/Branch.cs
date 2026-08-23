@@ -24,6 +24,7 @@ namespace GitTfs.Commands
         private readonly Cleanup _cleanup;
         private readonly InitBranch _initBranch;
         private readonly Rcheckin _rcheckin;
+        private readonly RemoteOptions _remoteOptions;
         public bool DisplayRemotes { get; set; }
         public bool ManageAll { get; set; }
         public bool ShouldRenameRemote { get; set; }
@@ -53,16 +54,18 @@ namespace GitTfs.Commands
                     { "no-fetch", "Don't fetch changeset for newly initialized branch(es)", v => NoFetch = (v != null) },
                     { "u|username=", "TFS username", v => TfsUsername = v },
                     { "p|password=", "TFS password", v => TfsPassword = v },
+                    { "keep-empty-folders", "Add a .gitkeep placeholder to TFVC folders that have no real content, so they survive into git", v => _remoteOptions.KeepEmptyFolders = v != null },
                 }
                 .Merge(_globals.OptionSet);
 
-        public Branch(Globals globals, Help helper, Cleanup cleanup, InitBranch initBranch, Rcheckin rcheckin)
+        public Branch(Globals globals, Help helper, Cleanup cleanup, InitBranch initBranch, Rcheckin rcheckin, RemoteOptions remoteOptions)
         {
             _globals = globals;
             _helper = helper;
             _cleanup = cleanup;
             _initBranch = initBranch;
             _rcheckin = rcheckin;
+            _remoteOptions = remoteOptions;
         }
 
         public void SetInitBranchParameters()
