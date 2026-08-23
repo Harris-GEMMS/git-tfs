@@ -804,19 +804,19 @@ namespace GitTfs.Core
             }
 
             var commitSha = MaxCommitHash;
-            var existingGitKeepPaths = Repository.GetCommit(commitSha).GetTree()
-                .Select(entry => entry.FullName)
-                .Where(EmptyFolderTracker.IsGitKeepPath)
-                .ToList();
-
-            var toAdd = neededGitKeepPaths.Except(existingGitKeepPaths, StringComparer.OrdinalIgnoreCase).ToList();
-            var toRemove = existingGitKeepPaths.Except(neededGitKeepPaths, StringComparer.OrdinalIgnoreCase).ToList();
-            if (toAdd.Count == 0 && toRemove.Count == 0)
-                return;
-
             string placeholderFile = null;
             try
             {
+                var existingGitKeepPaths = Repository.GetCommit(commitSha).GetTree()
+                    .Select(entry => entry.FullName)
+                    .Where(EmptyFolderTracker.IsGitKeepPath)
+                    .ToList();
+
+                var toAdd = neededGitKeepPaths.Except(existingGitKeepPaths, StringComparer.OrdinalIgnoreCase).ToList();
+                var toRemove = existingGitKeepPaths.Except(neededGitKeepPaths, StringComparer.OrdinalIgnoreCase).ToList();
+                if (toAdd.Count == 0 && toRemove.Count == 0)
+                    return;
+
                 var treeBuilder = Repository.GetTreeBuilder(commitSha);
                 if (toAdd.Count > 0)
                 {
@@ -842,7 +842,16 @@ namespace GitTfs.Core
             finally
             {
                 if (placeholderFile != null)
-                    File.Delete(placeholderFile);
+                {
+                    try
+                    {
+                        File.Delete(placeholderFile);
+                    }
+                    catch (Exception ex)
+                    {
+                        Trace.TraceWarning("warning: --keep-empty-folders: failed to delete temporary placeholder file '" + placeholderFile + "' (" + ex.Message + ").");
+                    }
+                }
             }
         }
 
