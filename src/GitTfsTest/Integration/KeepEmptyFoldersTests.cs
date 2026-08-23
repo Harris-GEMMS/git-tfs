@@ -104,5 +104,27 @@ namespace GitTfs.Test.Integration
             h.AssertFileInWorkspace("MyProject", "more-docs/.gitkeep", "");
             Assert.Equal(3, h.GetCommitCount("MyProject"));
         }
+
+        [FactExceptOnUnix]
+        public void FetchingWithNothingNewDoesNotRewriteTheExistingCommit()
+        {
+            h.SetupFake(r =>
+            {
+                r.Changeset(1, "Project created from template", DateTime.Parse("2012-01-01 12:12:12 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.Folder, "$/MyProject");
+                r.Changeset(2, "Add a file, no empty folders yet", DateTime.Parse("2012-01-02 12:12:12 -05:00"))
+                    .Change(TfsChangeType.Add, TfsItemType.File, "$/MyProject/README", "tldr");
+            });
+            h.Run("clone", h.TfsUrl, "$/MyProject", "MyProject");
+            var shaBeforeFetch = h.RevParseCommit("MyProject", "refs/remotes/tfs/default").Sha;
+
+            // Nothing new was added to the fake TFS server - turning the option on now,
+            // with nothing to fetch, must be a no-op rather than rewriting history.
+            h.RunIn("MyProject", "pull", "--keep-empty-folders");
+
+            var shaAfterFetch = h.RevParseCommit("MyProject", "refs/remotes/tfs/default").Sha;
+            Assert.Equal(shaBeforeFetch, shaAfterFetch);
+            h.AssertNoFileInWorkspace("MyProject", ".gitkeep");
+        }
     }
 }
