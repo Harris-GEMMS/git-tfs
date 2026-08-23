@@ -236,6 +236,14 @@ retroactively reported as failed over a placeholder-file concern.
   git-convention name in TFVC would be, this is documented as a known
   limitation rather than solved with provenance tracking.
 - **No retroactive backfill**, per the safety boundary above.
+- **Git notes from `--export` metadata on the amended commit are orphaned.**
+  `GitTfsRemote.ProcessChangeset` (`GitTfsRemote.cs:525`) attaches a git note
+  to the just-created commit's SHA when TFS metadata export is enabled. If
+  that same commit is the one amended for `--keep-empty-folders`, the note
+  stays attached to the original (now-unreferenced) SHA rather than the
+  replacement. This only affects the narrow combination of two opt-in
+  features on the exact last changeset of a fetch batch; documented as a
+  known limitation rather than solved by re-creating notes on the new SHA.
 
 ## Testing strategy
 
