@@ -1,6 +1,7 @@
 ﻿using System.Diagnostics;
 using System.Net;
 using System.Reflection;
+using Microsoft.TeamFoundation;
 using Microsoft.TeamFoundation.Client;
 using Microsoft.TeamFoundation.VersionControl.Client;
 using Microsoft.TeamFoundation.WorkItemTracking.Client;
@@ -164,9 +165,12 @@ namespace GitTfs.VsCommon
             do
             {
                 var startChangeset = new ChangesetVersionSpec(start);
-                changesets = Retry.Do(() => VersionControl.QueryHistory(path, lastChangeset, 0, RecursionType.Full,
-                    null, startChangeset, lastChangeset, BatchCount, true, true, true, true)
-                    .Cast<Changeset>().ToArray());
+                changesets = ReauthRetry.Do(
+                    () => Retry.Do(() => VersionControl.QueryHistory(path, lastChangeset, 0, RecursionType.Full,
+                        null, startChangeset, lastChangeset, BatchCount, true, true, true, true)
+                        .Cast<Changeset>().ToArray()),
+                    ex => ex is TeamFoundationServerUnauthorizedException,
+                    () => EnsureAuthenticated(forceReauthenticate: true));
                 if (changesets.Length > 0)
                     start = changesets[changesets.Length - 1].ChangesetId + 1;
 
@@ -554,11 +558,14 @@ namespace GitTfs.VsCommon
             {
                 Trace.WriteLine("Setting up a TFS workspace with subtrees at " + localDirectory);
                 mappings = mappings.ToList(); // avoid iterating through the mappings more than once, and don't retry when this iteration raises an error.
-                _workspaces.Add(remote.Id, workspace = Retry.Do(() =>
-                {
-                    var workingFolders = mappings.Select(x => new WorkingFolder(x.Item1, Path.Combine(localDirectory, x.Item2)));
-                    return GetWorkspace(workingFolders.ToArray());
-                }));
+                _workspaces.Add(remote.Id, workspace = ReauthRetry.Do(
+                    () => Retry.Do(() =>
+                    {
+                        var workingFolders = mappings.Select(x => new WorkingFolder(x.Item1, Path.Combine(localDirectory, x.Item2)));
+                        return GetWorkspace(workingFolders.ToArray());
+                    }),
+                    ex => ex is TeamFoundationServerUnauthorizedException,
+                    () => EnsureAuthenticated(forceReauthenticate: true)));
                 Janitor.CleanThisUpWhenWeClose(() => TryToDeleteWorkspace(workspace));
             }
             var tfsWorkspace = _container.With("localDirectory").EqualTo(localDirectory)
@@ -573,7 +580,10 @@ namespace GitTfs.VsCommon
         public void WithWorkspace(string localDirectory, IGitTfsRemote remote, TfsChangesetInfo versionToFetch, Action<ITfsWorkspace> action)
         {
             Trace.WriteLine("Setting up a TFS workspace at " + localDirectory);
-            var workspace = Retry.Do(() => GetWorkspace(new WorkingFolder(remote.TfsRepositoryPath, localDirectory)));
+            var workspace = ReauthRetry.Do(
+                () => Retry.Do(() => GetWorkspace(new WorkingFolder(remote.TfsRepositoryPath, localDirectory))),
+                ex => ex is TeamFoundationServerUnauthorizedException,
+                () => EnsureAuthenticated(forceReauthenticate: true));
             try
             {
                 var tfsWorkspace = _container.With("localDirectory").EqualTo(localDirectory)
@@ -706,7 +716,10 @@ namespace GitTfs.VsCommon
             workspace.Refresh();
 
             //  When deleting a workspace we may need to allow the TFS server some time to complete existing processing or re-try the workspace delete.
-            var deleteWsCompleted = Retry.Do(() => workspace.Delete(), TimeSpan.FromSeconds(5), 25);
+            var deleteWsCompleted = ReauthRetry.Do(
+                () => Retry.Do(() => workspace.Delete(), TimeSpan.FromSeconds(5), 25),
+                ex => ex is TeamFoundationServerUnauthorizedException,
+                () => EnsureAuthenticated(forceReauthenticate: true));
 
             // Include trace information about the success of the TFS API that deletes the workspace.
             Trace.WriteLine(string.Format(deleteWsCompleted ? "TFS Workspace '{0}' was removed." : "TFS Workspace '{0}' could not be removed", workspace.DisplayName));
