@@ -39,7 +39,7 @@ namespace GitTfs.VsFake
         public string Username { get; set; }
         public string Password { get; set; }
 
-        public void EnsureAuthenticated() { }
+        public void EnsureAuthenticated(bool forceReauthenticate = false) { }
 
         public void SetPathResolver() { }
 

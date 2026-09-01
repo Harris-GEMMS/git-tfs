@@ -420,7 +420,7 @@ namespace GitTfs.VsCommon
                                                                                                                                  // (blocks on an interactive prompt until approved or declined, no
                                                                                                                                  // retry-count ceiling) and retry only the still-failing items,
                                                                                                                                  // instead of letting the exception tear down the whole workspace.
-                                                                                                                                 _tfsHelper.EnsureAuthenticated();
+                                                                                                                                 _tfsHelper.EnsureAuthenticated(forceReauthenticate: true);
                                                                                                                                  continue;
                                                                                                                              }
 

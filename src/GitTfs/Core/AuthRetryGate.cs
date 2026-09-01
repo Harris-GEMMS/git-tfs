@@ -1,43 +1,100 @@
+using System.Runtime.ExceptionServices;
+
 namespace GitTfs.Core
 {
     /// <summary>
-    /// Serializes re-authentication attempts against a server URI and remembers the outcome, so
-    /// concurrent callers hitting the same stale session share one interactive prompt instead of
-    /// each popping their own: a caller behind the lock returns immediately once another caller has
-    /// already succeeded for that URI, and fails immediately (without prompting again) once another
-    /// caller has already been declined for it.
+    /// Serializes re-authentication attempts against a server URI so concurrent callers hitting the
+    /// same stale session share one interactive prompt instead of each popping their own: a caller
+    /// that arrives while another is already authenticating for the same URI waits for that attempt
+    /// and shares its outcome, rather than starting its own.
+    ///
+    /// A successful outcome is remembered per-URI only for callers that pass
+    /// <c>forceReauthenticate: false</c> (an opportunistic "are we still authenticated?" check) - it is
+    /// never used to skip a caller that passes <c>forceReauthenticate: true</c>, since that flag means
+    /// the caller just observed a fresh authentication failure for this URI and a stale cached success
+    /// would silently mask it. Once an attempt (successful or not) is no longer in flight, it is not
+    /// cached beyond that: a later re-authentication - e.g. the session going stale again, hours into
+    /// an unattended fetch - always gets its own fresh attempt.
     /// </summary>
     public class AuthRetryGate
     {
         private readonly object _lock = new object();
-        private Uri _lastAuthenticatedUri;
-        private Uri _lastFailedUri;
-        private Exception _lastFailure;
+        private readonly Dictionary<Uri, InFlightAttempt> _inFlight = new Dictionary<Uri, InFlightAttempt>();
+        private readonly HashSet<Uri> _lastKnownGood = new HashSet<Uri>();
 
-        public void Execute(Uri uri, Action authenticate)
+        public void Execute(Uri uri, bool forceReauthenticate, Action authenticate)
         {
+            InFlightAttempt attempt;
+            bool isOwner;
+
             lock (_lock)
             {
-                if (Equals(_lastAuthenticatedUri, uri))
+                if (_inFlight.TryGetValue(uri, out attempt))
+                {
+                    isOwner = false;
+                }
+                else if (!forceReauthenticate && _lastKnownGood.Contains(uri))
+                {
                     return;
-
-                if (Equals(_lastFailedUri, uri))
-                    throw _lastFailure;
-
-                try
-                {
-                    authenticate();
                 }
-                catch (Exception ex)
+                else
                 {
-                    _lastFailedUri = uri;
-                    _lastFailure = ex;
-                    throw;
+                    attempt = new InFlightAttempt();
+                    _inFlight[uri] = attempt;
+                    _lastKnownGood.Remove(uri);
+                    isOwner = true;
                 }
+            }
 
-                _lastAuthenticatedUri = uri;
-                _lastFailedUri = null;
-                _lastFailure = null;
+            if (!isOwner)
+            {
+                attempt.Wait();
+                return;
+            }
+
+            try
+            {
+                authenticate();
+                lock (_lock)
+                {
+                    _lastKnownGood.Add(uri);
+                }
+                attempt.Succeed();
+            }
+            catch (Exception ex)
+            {
+                attempt.Fail(ex);
+                throw;
+            }
+            finally
+            {
+                lock (_lock)
+                {
+                    _inFlight.Remove(uri);
+                }
+            }
+        }
+
+        private class InFlightAttempt
+        {
+            private readonly ManualResetEventSlim _done = new ManualResetEventSlim();
+            private Exception _exception;
+
+            public void Succeed() => _done.Set();
+
+            public void Fail(Exception ex)
+            {
+                _exception = ex;
+                _done.Set();
+            }
+
+            public void Wait()
+            {
+                _done.Wait();
+                if (_exception != null)
+                {
+                    ExceptionDispatchInfo.Capture(_exception).Throw();
+                }
             }
         }
     }

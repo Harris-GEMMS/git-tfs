@@ -29,7 +29,12 @@ namespace GitTfs.Core.TfsInterop
         IEnumerable<TfsLabel> GetLabels(string tfsPathBranch, string nameFilter = null);
         IEnumerable<string> GetAllTfsRootBranchesOrderedByCreation();
         IEnumerable<IBranchObject> GetBranches(bool getDeletedBranches = false);
-        void EnsureAuthenticated();
+        /// <param name="forceReauthenticate">
+        /// True if the caller just observed an authentication failure and needs a real
+        /// re-authentication attempt rather than a cached "still authenticated" result (e.g. after
+        /// catching TeamFoundationServerUnauthorizedException mid-fetch).
+        /// </param>
+        void EnsureAuthenticated(bool forceReauthenticate = false);
         void CreateBranch(string sourcePath, string targetPath, int changesetId, string comment = null);
         void CreateTfsRootBranch(string projectName, string mainBranch, string gitRepositoryPath, bool createTeamProjectFolder);
         bool IsExistingInTfs(string path);

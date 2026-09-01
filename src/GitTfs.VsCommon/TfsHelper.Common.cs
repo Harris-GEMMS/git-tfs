@@ -55,7 +55,7 @@ namespace GitTfs.VsCommon
 
         public bool HasCredentials => !string.IsNullOrEmpty(Username);
 
-        public void EnsureAuthenticated()
+        public void EnsureAuthenticated(bool forceReauthenticate = false)
         {
             if (string.IsNullOrEmpty(Url))
             {
@@ -78,16 +78,15 @@ namespace GitTfs.VsCommon
                 {
                     uri = new Uri(Url);
                 }
-                // Only authenticate if the TFS Server Uri is different to the last authenticated Uri,
-                // avoiding useless authentication attempts on an already authenticated server. This
-                // covers only the common case that the remotes are on the same TFS server.
-                //
-                // Routed through AuthRetryGate so that concurrent callers (parallel GetRequests
-                // batches re-authenticating after a stale session) share one interactive prompt: a
-                // caller blocked on the gate's lock returns immediately once another caller has
-                // already succeeded for this Uri, and fails immediately (without prompting again)
-                // once another caller has already been declined for it.
-                _authRetryGate.Execute(uri, () =>
+                // Routed through AuthRetryGate: opportunistic (non-forced) calls skip redundant
+                // authentication when the Uri is already known good, avoiding useless authentication
+                // attempts on an already authenticated server (this covers the common case that
+                // multiple remotes are on the same TFS server). A forced call - made after observing
+                // an authentication failure, e.g. from GetRequests mid-fetch - always attempts a real
+                // re-authentication regardless of any cached "known good" state. Either way, concurrent
+                // callers for the same Uri share one interactive prompt and its outcome instead of each
+                // popping their own.
+                _authRetryGate.Execute(uri, forceReauthenticate, () =>
                 {
                     _server = GetTfsCredential(uri);
                     _server.EnsureAuthenticated();
