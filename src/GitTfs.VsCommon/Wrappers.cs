@@ -2,6 +2,7 @@ using GitTfs.Core;
 using GitTfs.Core.TfsInterop;
 using GitTfs.Util;
 
+using Microsoft.TeamFoundation;
 using Microsoft.TeamFoundation.Server;
 using Microsoft.TeamFoundation.VersionControl.Client;
 using Microsoft.TeamFoundation.VersionControl.Common;
@@ -294,11 +295,13 @@ namespace GitTfs.VsCommon
     {
         private readonly TfsApiBridge _bridge;
         private readonly Workspace _workspace;
+        private readonly ITfsHelper _tfsHelper;
 
-        public WrapperForWorkspace(TfsApiBridge bridge, Workspace workspace) : base(workspace)
+        public WrapperForWorkspace(TfsApiBridge bridge, Workspace workspace, ITfsHelper tfsHelper) : base(workspace)
         {
             _bridge = bridge;
             _workspace = workspace;
+            _tfsHelper = tfsHelper;
         }
 
         public IPendingChange[] GetPendingChanges() => _bridge.Wrap<WrapperForPendingChange, PendingChange>(_workspace.GetPendingChanges());
@@ -406,7 +409,21 @@ namespace GitTfs.VsCommon
                                                                                                                      {
                                                                                                                          while (items.Length > 0)
                                                                                                                          {
-                                                                                                                             var status = _workspace.Get(items.ToArray(), GetOptions.Overwrite | GetOptions.GetAll);
+                                                                                                                             GetStatus status;
+                                                                                                                             try
+                                                                                                                             {
+                                                                                                                                 status = _workspace.Get(items.ToArray(), GetOptions.Overwrite | GetOptions.GetAll);
+                                                                                                                             }
+                                                                                                                             catch (TeamFoundationServerUnauthorizedException)
+                                                                                                                             {
+                                                                                                                                 // The authenticated session went stale mid-fetch. Re-authenticate
+                                                                                                                                 // (blocks on an interactive prompt until approved or declined, no
+                                                                                                                                 // retry-count ceiling) and retry only the still-failing items,
+                                                                                                                                 // instead of letting the exception tear down the whole workspace.
+                                                                                                                                 _tfsHelper.EnsureAuthenticated();
+                                                                                                                                 continue;
+                                                                                                                             }
+
                                                                                                                              if (status.NumFailures == 0)
                                                                                                                              {
                                                                                                                                  break;

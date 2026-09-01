@@ -17,6 +17,8 @@ namespace GitTfs.VsCommon
 
         public TWrapper Wrap<TWrapper, TWrapped>(TWrapped wrapped) where TWrapper : class => wrapped == null ? null : _container.With(this).With(wrapped).GetInstance<TWrapper>();
 
+        public TWrapper Wrap<TWrapper, TWrapped, TExtra>(TWrapped wrapped, TExtra extra) where TWrapper : class => wrapped == null ? null : _container.With(this).With(wrapped).With(extra).GetInstance<TWrapper>();
+
         public TWrapper[] Wrap<TWrapper, TWrapped>(IEnumerable wrapped) where TWrapper : class => wrapped == null ? null : wrapped.OfType<TWrapped>().Select(x => Wrap<TWrapper, TWrapped>(x)).ToArray();
 
         public TTfs Unwrap<TTfs>(object wrapper) where TTfs : class => wrapper == null ? null : (wrapper is TTfs ? (TTfs)wrapper : ((WrapperFor<TTfs>)wrapper).Unwrap());

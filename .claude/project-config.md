@@ -42,4 +42,4 @@ Names only. Resolve numeric transition IDs at runtime with `getTransitionsForJir
 | `{{TEST_COMMAND}}` | Test suite command (agent-runnable CLI; `dotnet` accepts `.sln` or `.slnx`) | `dotnet test MyApp.sln` | dotnet test src/GitTfs.sln |
 | `{{BUILD_CHECK_COMMAND}}` | Build / type check (compile IS the type check in C#) | `dotnet build MyApp.sln` | dotnet build src/GitTfs.sln |
 | `{{E2E_FRAMEWORK}}` | E2E framework | `Playwright` (web); `FlaUI` / `WinAppDriver` (WinForms/WPF) | (none) |
-| `{{VS_SOLUTION_DOCS}}` | Attach superpowers spec/plan docs to VS solution folders so they are reviewable in Visual Studio: `ask` (default; work-ticket prompts once, then records `yes`/`no`) / `yes` / `no`. Default `no` when the project has no `.sln`/`.slnx`. | `ask` | ask |
+| `{{VS_SOLUTION_DOCS}}` | Attach superpowers spec/plan docs to VS solution folders so they are reviewable in Visual Studio: `ask` (default; work-ticket prompts once, then records `yes`/`no`) / `yes` / `no`. Default `no` when the project has no `.sln`/`.slnx`. | `ask` | no |

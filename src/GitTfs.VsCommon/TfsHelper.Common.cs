@@ -25,7 +25,7 @@ namespace GitTfs.VsCommon
         protected TfsTeamProjectCollection _server;
         private static bool _resolverInstalled;
         private AuthorsFile _authorsFile;
-        private Uri _lastAuthenticatedUri;
+        private readonly AuthRetryGate _authRetryGate = new AuthRetryGate();
 
         public TfsHelperBase(TfsApiBridge bridge, IContainer container)
         {
@@ -79,14 +79,19 @@ namespace GitTfs.VsCommon
                     uri = new Uri(Url);
                 }
                 // Only authenticate if the TFS Server Uri is different to the last authenticated Uri,
-                // avoiding useless authentication attempts on an already authenticated server.
-                // This covers only the common case that the remotes are on the same TFS server.
-                if (_lastAuthenticatedUri?.ToString() != uri.ToString())
+                // avoiding useless authentication attempts on an already authenticated server. This
+                // covers only the common case that the remotes are on the same TFS server.
+                //
+                // Routed through AuthRetryGate so that concurrent callers (parallel GetRequests
+                // batches re-authenticating after a stale session) share one interactive prompt: a
+                // caller blocked on the gate's lock returns immediately once another caller has
+                // already succeeded for this Uri, and fails immediately (without prompting again)
+                // once another caller has already been declined for it.
+                _authRetryGate.Execute(uri, () =>
                 {
                     _server = GetTfsCredential(uri);
                     _server.EnsureAuthenticated();
-                    _lastAuthenticatedUri = uri;
-                }
+                });
             }
         }
 
@@ -560,7 +565,7 @@ namespace GitTfs.VsCommon
             var tfsWorkspace = _container.With("localDirectory").EqualTo(localDirectory)
                 .With("remote").EqualTo(remote)
                 .With("contextVersion").EqualTo(versionToFetch)
-                .With("workspace").EqualTo(_bridge.Wrap<WrapperForWorkspace, Workspace>(workspace))
+                .With("workspace").EqualTo(_bridge.Wrap<WrapperForWorkspace, Workspace, ITfsHelper>(workspace, this))
                 .With("tfsHelper").EqualTo(this)
                 .GetInstance<TfsWorkspace>();
             action(tfsWorkspace);
@@ -575,7 +580,7 @@ namespace GitTfs.VsCommon
                 var tfsWorkspace = _container.With("localDirectory").EqualTo(localDirectory)
                     .With("remote").EqualTo(remote)
                     .With("contextVersion").EqualTo(versionToFetch)
-                    .With("workspace").EqualTo(_bridge.Wrap<WrapperForWorkspace, Workspace>(workspace))
+                    .With("workspace").EqualTo(_bridge.Wrap<WrapperForWorkspace, Workspace, ITfsHelper>(workspace, this))
                     .With("tfsHelper").EqualTo(this)
                     .GetInstance<TfsWorkspace>();
                 action(tfsWorkspace);

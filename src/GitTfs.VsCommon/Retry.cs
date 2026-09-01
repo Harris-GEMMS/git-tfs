@@ -24,6 +24,14 @@ namespace GitTfs.VsCommon
                 {
                     return action();
                 }
+                catch (Microsoft.TeamFoundation.TeamFoundationServerUnauthorizedException)
+                {
+                    // Never blindly retried here: the caller (e.g. WrapperForWorkspace.GetRequests) is
+                    // expected to re-authenticate and retry explicitly. Rethrowing immediately also
+                    // means a declined re-authentication propagates right away instead of after
+                    // retryCount pointless sleep-and-retry cycles.
+                    throw;
+                }
                 catch (Microsoft.TeamFoundation.TeamFoundationServerException ex)
                 {
                     exceptions.Add(ex);

@@ -36,6 +36,15 @@ namespace GitTfsTest.Core
         }
 
         [Fact]
+        public void WrapsObjectWithExtraConstructorArgument()
+        {
+            var originalObject = new OriginalType();
+            var extra = "extra-value";
+            var wrappedObject = _mocks.ClassUnderTest.Wrap<WrapperForOriginalTypeWithExtra, OriginalType, string>(originalObject, extra);
+            Assert.Same(extra, wrappedObject.Extra);
+        }
+
+        [Fact]
         public void WrapsAndUnwrapsArray()
         {
             var originalObjects = new[] { new OriginalType() };
@@ -100,6 +109,14 @@ namespace GitTfsTest.Core
                 Bridge = b;
             }
             public TfsApiBridge Bridge { get; private set; }
+        }
+        public class WrapperForOriginalTypeWithExtra : WrapperFor<OriginalType>, IOriginalType
+        {
+            public WrapperForOriginalTypeWithExtra(OriginalType o, string extra) : base(o)
+            {
+                Extra = extra;
+            }
+            public string Extra { get; private set; }
         }
 
         public enum OriginalEnum
