@@ -4,6 +4,10 @@ namespace GitTfs.Core
     /// Retries an operation that fails due to an authentication problem, re-authenticating first. Takes
     /// a predicate rather than a concrete exception type so this stays free of any VCS-specific
     /// dependency; callers (e.g. GitTfs.VsCommon) supply their own exception check.
+    ///
+    /// There is no retry-count ceiling: <paramref name="reauthenticate"/> is the actual backstop (it
+    /// blocks on an interactive prompt until the user approves or declines). If it reports success while
+    /// the underlying session is still bad for some other reason, this keeps retrying indefinitely.
     /// </summary>
     public static class ReauthRetry
     {
