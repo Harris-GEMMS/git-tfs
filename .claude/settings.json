@@ -1,0 +1,11 @@
+{
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true,
+    "atlassian@claude-plugins-official": true,
+    "csharp-lsp@claude-plugins-official": true,
+    "niche-csharp-standards@niche-orchestration": true,
+    "niche-tfvc@niche-orchestration": false,
+    "niche-gemms-sql-proc@niche-orchestration": false,
+    "niche-publish-gemms-hub@niche-orchestration": false
+  }
+}
