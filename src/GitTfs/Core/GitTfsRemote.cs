@@ -32,6 +32,13 @@ namespace GitTfs.Core
             Repository = repository;
 
             RemoteInfo = info;
+            // A --no-parallel passed on this invocation's command line always wins over the persisted
+            // per-remote setting; it is never used to clear a persisted true back to false, and no other
+            // RemoteInfo field is touched here (unlike RemoteInfo.RemoteOptions's setter, which would
+            // overwrite Username/Password/IgnoreRegex/GitIgnorePath with whatever this invocation's
+            // RemoteOptions happens to hold).
+            if (_remoteOptions.NoParallel)
+                RemoteInfo.NoParallel = true;
             Id = info.Id;
             Tfs.Url = info.Url;
             TfsRepositoryPath = info.Repository;

@@ -1,4 +1,5 @@
-﻿using GitTfs.Core;
+﻿using GitTfs.Commands;
+using GitTfs.Core;
 using GitTfs.Core.TfsInterop;
 
 using Moq;
@@ -46,7 +47,28 @@ namespace GitTfs.Test.Core
             Assert.False(remote.MatchesUrlAndRepositoryPath("test", "$/shouldnotmatch"));
         }
 
-        private GitTfsRemote BuildRemote(string repository, string url = "", string[] legacyUrls = null, string id = "test")
+        [Fact]
+        public void GivenNoParallelPassedOnTheCommandLine_WhenThePersistedRemoteIsNotNoParallel_ThenTheRemoteIsNoParallel()
+        {
+            var remote = BuildRemote(url: "test", repository: "$/Test", persistedNoParallel: false, cliNoParallel: true);
+            Assert.True(remote.RemoteInfo.NoParallel);
+        }
+
+        [Fact]
+        public void GivenNoParallelNotPassedOnTheCommandLine_WhenThePersistedRemoteIsNoParallel_ThenTheRemoteStaysNoParallel()
+        {
+            var remote = BuildRemote(url: "test", repository: "$/Test", persistedNoParallel: true, cliNoParallel: false);
+            Assert.True(remote.RemoteInfo.NoParallel);
+        }
+
+        [Fact]
+        public void GivenNoParallelNotPassedOnTheCommandLine_WhenThePersistedRemoteIsNotNoParallel_ThenTheRemoteStaysParallel()
+        {
+            var remote = BuildRemote(url: "test", repository: "$/Test", persistedNoParallel: false, cliNoParallel: false);
+            Assert.False(remote.RemoteInfo.NoParallel);
+        }
+
+        private GitTfsRemote BuildRemote(string repository, string url = "", string[] legacyUrls = null, string id = "test", bool persistedNoParallel = false, bool cliNoParallel = false)
         {
             var info = new RemoteInfo
             {
@@ -54,9 +76,11 @@ namespace GitTfs.Test.Core
                 Url = url,
                 Repository = repository,
                 Aliases = legacyUrls ?? new string[0],
+                NoParallel = persistedNoParallel,
             };
             var mocks = new MoqAutoMocker<GitTfsRemote>();
             mocks.Inject(info);
+            mocks.Inject(new RemoteOptions { NoParallel = cliNoParallel });
             var mockTfsHelper = new Mock<ITfsHelper>();
             mockTfsHelper.SetupAllProperties();
             mocks.Inject(mockTfsHelper.Object); // GitTfsRemote backs the TfsUrl with this.
